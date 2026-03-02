@@ -107,7 +107,7 @@ try:
     print(f"  TA={TA}C, RH_A={RH_A*100:.0f}%, Tmr={Tmr}C")
     print(f"  Resultado:")
     print(f"    T0={result['T0']:.2f}C (temperatura del chorro)")
-    print(f"    Ti={result['Ti']:.2f}C (temperatura en zona occupied)")
+    print(f"    Tj={result['Tj']:.2f}C (temperatura en zona occupied)")
     print(f"    V0={result['V0']:.3f} m/s (velocidad del chorro)")
     print(f"    Q_total={result['Q_total']:.3f} kW")
     print(f"    Q_sens={result['Q_sens']:.3f} kW")

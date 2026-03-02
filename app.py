@@ -165,9 +165,9 @@ def solve_case(TA,RH_A,Tmr,Vj,M,Icl,D0,X0, rh0=0.95, p_atm_kpa=101.325, include_
         T0=mid
     P0 = rh0*psat_mmhg(T0)
     Vratio,Tratio = jet_ratios(X0,D0,include_buoyancy,TA,T0)
-    Ti = TA - Tratio*(TA - T0)
-    Pi = PA - Tratio*(PA - P0)
-    RH_i = rh_from_pv_T(Pi,Ti)
+    Tj = TA - Tratio*(TA - T0)  # Temperature at target area (jet impact zone)
+    Pj = PA - Tratio*(PA - P0)  # Vapor pressure at target area
+    RH_j = rh_from_pv_T(Pj,Tj)  # Relative humidity at target area
     V0 = Vj/max(1e-9,Vratio)
     area0 = math.pi*(D0**2)/4.0
     Q0 = V0*area0
@@ -181,8 +181,8 @@ def solve_case(TA,RH_A,Tmr,Vj,M,Icl,D0,X0, rh0=0.95, p_atm_kpa=101.325, include_
     m_dot0 = rho0*Q0
     Q_total = m_dot0*(hA - h0)
     Q_sens  = m_dot0*1.006*(TA - T0)
-    return dict(m=m, C=C, Ta50=Ta50, PA=PA, Pi=Pi, P0=P0, Ti=Ti, T0=T0,
-                RH_i=RH_i, RH_0=rh0, Vratio=Vratio, Tratio=Tratio,
+    return dict(m=m, C=C, Ta50=Ta50, PA=PA, Pj=Pj, P0=P0, Tj=Tj, T0=T0,
+                RH_j=RH_j, RH_0=rh0, Vratio=Vratio, Tratio=Tratio,
                 V0=V0, Q0=Q0, Qj=Qj, Qe=Qe, m_dot0=m_dot0, Q_total=Q_total, Q_sens=Q_sens)
 
 class MainWindow(QtWidgets.QMainWindow):

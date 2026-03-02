@@ -48,8 +48,8 @@ for rh0 in [0.90, 0.95, 1.00]:
     result = solve_case(TA, RH_A, Tmr, Vj, M, Icl, D0, X0, rh0=rh0)
     
     T0_calc = result['T0']
-    Tj_calc = result['Ti']
-    Pj_calc = result['Pi']
+    Tj_calc = result['Tj']
+    Pj_calc = result['Pj']
     
     err_T0 = abs(T0_calc - expected['T0'])
     err_Tj = abs(Tj_calc - expected['Tj'])
@@ -91,9 +91,9 @@ print(f"  P0 = {result['P0']:.2f} mm Hg")
 print(f"  RH0 = {result['RH_0']*100:.1f}%")
 
 print(f"\nCondiciones en zona de impacto (target area):")
-print(f"  Tj = {result['Ti']:.2f}°C")
-print(f"  Pj = {result['Pi']:.2f} mm Hg")
-print(f"  RHj = {result['RH_i']*100:.1f}%")
+print(f"  Tj = {result['Tj']:.2f}°C")
+print(f"  Pj = {result['Pj']:.2f} mm Hg")
+print(f"  RHj = {result['RH_j']*100:.1f}%")
 
 print(f"\nParámetros del jet:")
 print(f"  Vratio = {result['Vratio']:.6f}")
@@ -135,8 +135,8 @@ print(f"  Diferencia: {abs(P0_eq27 - P0_result):.4f} mm Hg")
 
 # Ec 26: Pj = -m*Tj + C
 C_target = result['C']
-Tj = result['Ti']
-Pj_result = result['Pi']
+Tj = result['Tj']
+Pj_result = result['Pj']
 Pj_eq26 = -m * Tj + C_target
 
 print(f"\nEcuación 26 (Target Area):")
