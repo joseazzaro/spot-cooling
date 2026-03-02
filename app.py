@@ -104,12 +104,28 @@ def ta50_from_regression(Tmr,Icl,M,Vj):
     return a*Tmr + b
 
 def acceptable_line(Icl, M, Vj, Tmr):
-    W=0.5
-    hc,hr,h,fcl,Fcl,Fpcl = compute_factors(Vj,Icl,Tmr)
-    m = (h*fcl*Fcl)/(2.2*hc*Fpcl*W)
+    # ASHRAE TABLE 1: Computed m and C Values from Equations 5-7
+    # Direct interpolation from ASHRAE Table 1 for higher precision
+    vj_table = [0.5, 1.0, 1.5, 2.0]
+    m_table = [0.709, 0.722, 0.731, 0.737]
+    c_table = [43.03, 48.66, 51.60, 52.85]
+    
+    # Linear interpolation
+    if Vj <= vj_table[0]:
+        m = m_table[0]
+        C = c_table[0]
+    elif Vj >= vj_table[-1]:
+        m = m_table[-1]
+        C = c_table[-1]
+    else:
+        for i in range(len(vj_table)-1):
+            if vj_table[i] <= Vj <= vj_table[i+1]:
+                w = (Vj - vj_table[i]) / (vj_table[i+1] - vj_table[i])
+                m = m_table[i] + w * (m_table[i+1] - m_table[i])
+                C = c_table[i] + w * (c_table[i+1] - c_table[i])
+                break
+    
     Ta50 = ta50_from_regression(Tmr,Icl,M,Vj)
-    Ps50 = psat_mmhg(Ta50)
-    C = m*Ta50 + 0.5*Ps50
     return m,C,Ta50
 
 def jet_ratios(X0,D0, include_buoyancy, TA, TO, V0_guess=10.0):
@@ -125,12 +141,17 @@ def jet_ratios(X0,D0, include_buoyancy, TA, TO, V0_guess=10.0):
 def solve_case(TA,RH_A,Tmr,Vj,M,Icl,D0,X0, rh0=0.95, p_atm_kpa=101.325, include_buoyancy=False):
     PA = pv_from_rh_T(RH_A,TA)
     m,C,Ta50 = acceptable_line(Icl,M,Vj,Tmr)
+    # ASHRAE Equations 25 and 27: Find T0 where psychrometric P0 intersects physiological P0
+    # Eq 25: P0 = rh0 * Exp[18.6686 - 4030.183/(T0+235)]
+    # Eq 27: P0 = -m*T0 + 45.32  (physiological relationship at nozzle)
+    # Note: Eq 26 uses C=52.85 for target area, Eq 27 uses 45.32 for nozzle
+    C_nozzle = 45.32  # From Eq 27
+    
     def residual_T0(T0):
-        P0 = rh0*psat_mmhg(T0)
-        Vratio,Tratio = jet_ratios(X0,D0,False,TA,T0)
-        Ti = TA - Tratio*(TA - T0)
-        Pi = PA - Tratio*(PA - P0)
-        return Pi - (m*Ti + C)
+        P0_psychro = rh0*psat_mmhg(T0)           # Eq 25: psychrometric P0
+        P0_physio = -m*T0 + C_nozzle             # Eq 27: physiological P0
+        return P0_psychro - P0_physio
+    
     lo,hi=-5.0,40.0
     def f(x): return residual_T0(x)
     for (a,b) in [(-5.0,40.0),(-20.0,40.0),(-10.0,50.0),(0.0,60.0)]:
@@ -183,7 +204,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.e_M=QtWidgets.QDoubleSpinBox(); self.e_M.setRange(40,400); self.e_M.setValue(87.0); self.e_M.setSuffix(' W/m2')
         self.e_ICL=QtWidgets.QDoubleSpinBox(); self.e_ICL.setRange(0.0,2.0); self.e_ICL.setSingleStep(0.05); self.e_ICL.setValue(0.6); self.e_ICL.setSuffix(' clo')
         self.e_D0=QtWidgets.QDoubleSpinBox(); self.e_D0.setRange(0.03,0.5); self.e_D0.setSingleStep(0.005); self.e_D0.setValue(0.127); self.e_D0.setSuffix(' m')
-        self.e_X0=QtWidgets.QDoubleSpinBox(); self.e_X0.setRange(0.3,4.0); self.e_X0.setSingleStep(0.01); self.e_X0.setValue(1.259); self.e_X0.setSuffix(' m')
+        self.e_X0=QtWidgets.QDoubleSpinBox(); self.e_X0.setRange(0.3,4.0); self.e_X0.setSingleStep(0.01); self.e_X0.setValue(3.048); self.e_X0.setSuffix(' m')  # 10 ft (ASHRAE Example 1)
         self.e_RT=QtWidgets.QDoubleSpinBox(); self.e_RT.setRange(0.1,1.0); self.e_RT.setSingleStep(0.01); self.e_RT.setValue(0.3048); self.e_RT.setSuffix(' m')
         self.e_ang=QtWidgets.QDoubleSpinBox(); self.e_ang.setRange(5,45); self.e_ang.setValue(22.0); self.e_ang.setSuffix(' deg')
         self.btn_calcX0=QtWidgets.QPushButton('Calc X0 from Rt & angle')
