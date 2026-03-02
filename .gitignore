@@ -1,0 +1,36 @@
+# Entornos virtuales
+venv/
+virt/
+.env
+*.env
+
+# Python cache / artefactos
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.eggs/
+build/
+dist/
+pip-wheel-metadata/
+
+# Testing / coverage
+.coverage
+.coverage.*
+.pytest_cache/
+htmlcov/
+
+# VS Code
+.vscode/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Archivos de sistema
+.DS_Store
+Thumbs.db
+
+# PDF (todos los PDF fuera del repo)
+*.pdf

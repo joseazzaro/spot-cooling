@@ -1,0 +1,32 @@
+python -m venv virt
+virt\Scripts\activate
+(virt) PS C:\Users\Jose\OneDrive - SRL AZZAMURA\ PROYECTO> pip install PyQt5
+
+git --versión
+para chequear que está instalado y la versión
+
+git init
+para crear el .git que convierte el proyecto en un repositorio
+
+En la carpeta raíz del proyecto, creé un archivo llamado .gitignore y dentro del mismo escribí
+
+# Excluir pycache
+__pycache__/
+*.pyc
+*.pyo
+
+# Excluir el entorno virtual
+venv/
+.env
+
+Con solo eso, Git ignorará automáticamente esas carpetas y archivos
+
+git status
+
+Me dice dónde estoy y qué archivos no sigue
+
+--------------------------------------------------------------------
+Si ya hice un commit y estaba el __pycache__, lo borro con esto
+git rm -r --cached __pycache__
+--------------------------------------------------------------------
+
