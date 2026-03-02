@@ -203,7 +203,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.e_VJ=QtWidgets.QDoubleSpinBox(); self.e_VJ.setRange(0.2,3.0); self.e_VJ.setSingleStep(0.1); self.e_VJ.setValue(2.0); self.e_VJ.setSuffix(' m/s')
         self.e_M=QtWidgets.QDoubleSpinBox(); self.e_M.setRange(40,400); self.e_M.setValue(87.0); self.e_M.setSuffix(' W/m2')
         self.e_ICL=QtWidgets.QDoubleSpinBox(); self.e_ICL.setRange(0.0,2.0); self.e_ICL.setSingleStep(0.05); self.e_ICL.setValue(0.6); self.e_ICL.setSuffix(' clo')
-        self.e_D0=QtWidgets.QDoubleSpinBox(); self.e_D0.setRange(0.03,0.5); self.e_D0.setSingleStep(0.005); self.e_D0.setValue(0.127); self.e_D0.setSuffix(' m')
+        self.e_D0=QtWidgets.QDoubleSpinBox(); self.e_D0.setRange(0.03,0.5); self.e_D0.setSingleStep(0.005); self.e_D0.setValue(0.3048); self.e_D0.setSuffix(' m')
         self.e_X0=QtWidgets.QDoubleSpinBox(); self.e_X0.setRange(0.3,4.0); self.e_X0.setSingleStep(0.01); self.e_X0.setValue(3.048); self.e_X0.setSuffix(' m')  # 10 ft (ASHRAE Example 1)
         self.e_RT=QtWidgets.QDoubleSpinBox(); self.e_RT.setRange(0.1,1.0); self.e_RT.setSingleStep(0.01); self.e_RT.setValue(0.3048); self.e_RT.setSuffix(' m')
         self.e_ang=QtWidgets.QDoubleSpinBox(); self.e_ang.setRange(5,45); self.e_ang.setValue(22.0); self.e_ang.setSuffix(' deg')
