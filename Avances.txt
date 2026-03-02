@@ -30,3 +30,22 @@ Si ya hice un commit y estaba el __pycache__, lo borro con esto
 git rm -r --cached __pycache__
 --------------------------------------------------------------------
 
+primer commit
+git add .
+git commit -m "Primer commit limpio: código y documentación, excluyendo PDFs"
+
+En GitHub cree un repositorio nuevoi llamado spot-cooling
+
+configuro el remoto desde la terminal
+git remote add origin https://github.com/joseazzaro/spot-cooling.git
+
+chequeo que esté con 
+git remote -v
+
+Hago el primer push del master
+git push -u origin master
+
+Creo un Branch llamado dev y cambio a este branch
+git checkout -b dev
+
+
