@@ -189,6 +189,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_use_selected = QtWidgets.QPushButton('Use selected point')
         self.btn_use_selected.setEnabled(False)
         self.btn_pdf = QtWidgets.QPushButton('Export PDF...')
+        self.btn_cfd = QtWidgets.QPushButton('Run CFD Simulation (2D LBM)')
         
         # Labels
         self.lbl_selected = QtWidgets.QLabel('Selected from chart: None')
@@ -233,6 +234,7 @@ class MainWindow(QtWidgets.QMainWindow):
         form.addRow(self.btn_run)
         form.addRow(self.btn_use_selected)
         form.addRow(self.btn_pdf)
+        form.addRow(self.btn_cfd)
         
         # Psychrometric
         form.addRow(QtWidgets.QLabel('<b>Psychrometric</b>'))
@@ -245,6 +247,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_run.clicked.connect(self.run_calc)
         self.btn_use_selected.clicked.connect(self.use_selected_point)
         self.btn_pdf.clicked.connect(self.export_pdf)
+        self.btn_cfd.clicked.connect(self.run_cfd_simulation)
         
         # Chart update on parameter changes
         self.e_TA.valueChanged.connect(self.on_chart_params_changed)
@@ -539,3 +542,60 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             return
         self.export_pdf_from_dialog(self.last_report_html)
+    
+    def run_cfd_simulation(self):
+        """Execute 2D LBM CFD simulation of the jet"""
+        try:
+            # First, run normal calculation to get the solution
+            from controllers.main_controller import MainController
+            controller = MainController(self)
+            result = controller.solve_normal()
+            
+            if not self._is_physical_solution(result, TA=self.e_TA.value()):
+                QtWidgets.QMessageBox.warning(
+                    self, 'Invalid solution',
+                    'Current parameters do not produce a physical solution. '
+                    'Please adjust parameters and try again.'
+                )
+                return
+            
+            # Now create CFD simulation from the result
+            from controllers.cfd_controller import create_cfd_from_cooling_solution
+            from views.cfd_visualizer import CFDResultsDialog
+            
+            # Show progress dialog while running simulation
+            progress = QtWidgets.QProgressDialog(
+                'Running 2D Lattice Boltzmann Simulation...', 
+                'Cancel', 0, 100, self
+            )
+            progress.setWindowModality(QtCore.Qt.WindowModal)
+            progress.setAutoClose(True)
+            progress.setAutoReset(True)
+            
+            def update_progress(step, total):
+                progress.setValue(int(100 * step / total))
+                QtWidgets.QApplication.processEvents()
+            
+            cfd_controller = create_cfd_from_cooling_solution(self, result)
+            
+            # Run simulation
+            results = cfd_controller.run_simulation(n_steps=500, callback=update_progress)
+            
+            # Show results dialog
+            dlg = CFDResultsDialog(self)
+            dlg.set_results(
+                velocity=results['velocity'],
+                ux=results['ux'],
+                uy=results['uy'],
+                rho=results['rho'],
+                reynolds=results['reynolds'],
+                mach=results['mach'],
+                jet_diameter_physical=results['jet_diameter'],
+                lattice_spacing=0.001  # 1mm lattice spacing
+            )
+            
+            progress.close()
+            dlg.exec_()
+            
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, 'CFD Error', f'Simulation failed:\n{str(e)}')
