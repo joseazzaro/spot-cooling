@@ -1,0 +1,38 @@
+import pandas as pd
+cmp = pd.read_csv('comparacion_tabla2_base.csv')
+max_dT0 = cmp['dT0'].abs().max()
+max_dTj = cmp['dTj'].abs().max()
+max_dPj = cmp['dPj'].abs().max()
+mean_dT0 = cmp['dT0'].abs().mean()
+mean_dTj = cmp['dTj'].abs().mean()
+mean_dPj = cmp['dPj'].abs().mean()
+
+lines = []
+lines.append('# Comparacion Example 1 vs Excel (Resultados.xlsx)')
+lines.append('')
+lines.append('## Alcance')
+lines.append('- Archivo analizado: Resultados.xlsx (Hoja1).')
+lines.append('- Tablas encontradas en el Excel: Tabla 1 y Tabla 2 (Vj=2.0, 1.5, 1.0, 0.5).')
+lines.append('- No se encontraron Tabla 3, Tabla 4 ni Tabla 5 en este archivo.')
+lines.append('')
+lines.append('## Metricas de error (Tabla 2, bloque base)')
+lines.append(f'- Max |dT0| = {max_dT0:.4f} C')
+lines.append(f'- Max |dTj| = {max_dTj:.4f} C')
+lines.append(f'- Max |dPj| = {max_dPj:.4f} mmHg')
+lines.append(f'- Mean |dT0| = {mean_dT0:.4f} C')
+lines.append(f'- Mean |dTj| = {mean_dTj:.4f} C')
+lines.append(f'- Mean |dPj| = {mean_dPj:.4f} mmHg')
+lines.append('')
+lines.append('## Observaciones')
+lines.append('- Para Vj=2.0 m/s, la concordancia es buena (errores pequenos).')
+lines.append('- Para Vj=1.5, 1.0 y 0.5 m/s hay diferencias grandes en T0/Tj/Pj respecto al Excel.')
+lines.append('- El bloque base del Excel parece no seguir el mismo modelo implementado en app.py para esos Vj.')
+lines.append('')
+lines.append('## Archivos generados')
+lines.append('- comparacion_tabla2_base.csv (detalle fila a fila).')
+lines.append('- Resultados_dump.txt (mapa de celdas no vacias del Excel).')
+
+with open('COMPARACION_EXAMPLE1_RESULTADOS.md','w',encoding='utf-8') as f:
+    f.write('\n'.join(lines))
+
+print('WROTE COMPARACION_EXAMPLE1_RESULTADOS.md')

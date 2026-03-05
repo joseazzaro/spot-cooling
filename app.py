@@ -7,9 +7,6 @@ from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 import numpy as np
 
-# Import psychrometric functions from psychro module
-from psychro.psychro_fun import Psy_TdbRH
-
 # psychro utils
 import math
 
@@ -102,7 +99,7 @@ def regress_Ta50_coeffs(Icl, M, V):
 # core
 
 def compute_factors(Vj, Icl, Tmr):
-    hc = 8.3*(max(1e-6,Vj)**0.6)
+    hc = 8.3*(max(1e-6,Vj)**0.5)
     hr = 3.87 + 0.031*Tmr
     h  = hc + hr
     fcl = 1.0 + 0.2*Icl
@@ -114,30 +111,18 @@ def ta50_from_regression(Tmr,Icl,M,Vj):
     a,b = regress_Ta50_coeffs(Icl,M,Vj)
     return a*Tmr + b
 
+def compute_acceptable_line_params(Icl, M, Vj, Tmr):
+    Ta50 = ta50_from_regression(Tmr, Icl, M, Vj)
+    hc, hr, h, fcl, Fcl, Fpcl = compute_factors(Vj, Icl, Tmr)
+    m = (fcl * Fcl) / max(1e-12, (1.1 * Fpcl))
+    Ps_ta50 = psat_mmhg(Ta50)
+    C = m * Ta50 + 0.5 * Ps_ta50
+    return m, C, Ta50
+
 def acceptable_line(Icl, M, Vj, Tmr):
-    # ASHRAE TABLE 1: Computed m and C Values from Equations 5-7
-    # Direct interpolation from ASHRAE Table 1 for higher precision
-    vj_table = [0.5, 1.0, 1.5, 2.0]
-    m_table = [0.709, 0.722, 0.731, 0.737]
-    c_table = [43.03, 48.66, 51.60, 52.85]
-    
-    # Linear interpolation
-    if Vj <= vj_table[0]:
-        m = m_table[0]
-        C = c_table[0]
-    elif Vj >= vj_table[-1]:
-        m = m_table[-1]
-        C = c_table[-1]
-    else:
-        for i in range(len(vj_table)-1):
-            if vj_table[i] <= Vj <= vj_table[i+1]:
-                w = (Vj - vj_table[i]) / (vj_table[i+1] - vj_table[i])
-                m = m_table[i] + w * (m_table[i+1] - m_table[i])
-                C = c_table[i] + w * (c_table[i+1] - c_table[i])
-                break
-    
-    Ta50 = ta50_from_regression(Tmr,Icl,M,Vj)
-    return m,C,Ta50
+    # Ta(0.5) from Table 1 regression (with interpolation in Icl, M, Vj),
+    # then m and C from ASHRAE Equations 5-7.
+    return compute_acceptable_line_params(Icl, M, Vj, Tmr)
 
 def jet_ratios(X0,D0, include_buoyancy, TA, TO, V0_guess=10.0):
     r = (X0/D0) + 2.572
@@ -152,49 +137,75 @@ def jet_ratios(X0,D0, include_buoyancy, TA, TO, V0_guess=10.0):
 def solve_case(TA,RH_A,Tmr,Vj,M,Icl,D0,X0, rh0=0.95, p_atm_kpa=101.325, include_buoyancy=False):
     PA = pv_from_rh_T(RH_A,TA)
     m,C,Ta50 = acceptable_line(Icl,M,Vj,Tmr)
-    # ASHRAE Equations 25 and 27: Find T0 where psychrometric P0 intersects physiological P0
-    # Eq 25: P0 = rh0 * Exp[18.6686 - 4030.183/(T0+235)]
-    # Eq 27: P0 = -m*T0 + 45.32  (physiological relationship at nozzle)
-    # Note: Eq 26 uses C=52.85 for target area, Eq 27 uses 45.32 for nozzle
-    C_nozzle = 45.32  # From Eq 27
     
-    def residual_T0(T0):
-        P0_psychro = rh0*psat_mmhg(T0)           # Eq 25: psychrometric P0
-        P0_physio = -m*T0 + C_nozzle             # Eq 27: physiological P0
-        return P0_psychro - P0_physio
+    # ASHRAE Standard calculation for spot cooling
+    # Step 1: Get velocity and temperature ratios from jet model (Eqs 20-22)
+    Vratio, Tratio = jet_ratios(X0,D0,include_buoyancy,TA,TA)  # Tratio is (TA-Tj)/(TA-T0)
     
-    lo,hi=-5.0,40.0
-    def f(x): return residual_T0(x)
-    for (a,b) in [(-5.0,40.0),(-20.0,40.0),(-10.0,50.0),(0.0,60.0)]:
-        if f(a)*f(b)<=0: lo,hi=a,b; break
+    # Step 2: Find T0 from psychrometric-physiological intersection (Eqs 25+27)
+    # Eq 25: P0 = rh0 * Exp[18.6686 - 4030.183/(T0+235)]  (psychrometric)
+    # Eq 27: P0 = -m*T0 + C_nozzle  (physiological at nozzle)
+    # We need to find C_nozzle first using the constraint that Tratio must be satisfied
+    
+    # Binary search for correct T0 that satisfies all constraints
+    # Lower bound: very cold
+    # Upper bound: close to ambient
+    T0_lo = -10.0
+    T0_hi = TA - 0.1
+    
+    # Residual function: given T0, check if Tratio is satisfied
+    def compute_residual(T0_test):
+        P0 = rh0 * psat_mmhg(T0_test)
+        
+        # From Eq 21: (TA - Tj) / (TA - T0) = Tratio
+        # So: Tj = TA - Tratio * (TA - T0)
+        Tj = TA - Tratio * (TA - T0_test)
+        
+        # Operating line from A to 0:
+        # Line passes through (TA, PA) and (T0, P0)
+        # Equation: P = PA + slope * (T - TA)
+        # where slope = (P0 - PA) / (T0 - TA)
+        if abs(T0_test - TA) < 1e-9:
+            return 1e9  # Unphysical
+        
+        slope_A0 = (P0 - PA) / (T0_test - TA)
+        Pj_from_operating_line = PA + slope_A0 * (Tj - TA)
+        
+        # Acceptable line at Vj:
+        # P = -m*T + C (this is for target area)
+        Pj_from_acceptable_line = -m * Tj + C
+        
+        # Residual: difference between two Pj calculations
+        return Pj_from_operating_line - Pj_from_acceptable_line
+    
+    def f(T0_test):
+        return compute_residual(T0_test)
+    
+    # Find bracket with sign change
+    for (a, b) in [(-10.0, TA-0.1), (-20.0, TA-0.1), (-5.0, TA-0.1), (0.0, TA-0.5)]:
+        if f(a)*f(b) <= 0:
+            T0_lo, T0_hi = a, b
+            break
+    
+    # Bisect to find T0
     for _ in range(100):
-        mid=0.5*(lo+hi); fm=f(mid)
-        if abs(fm)<1e-4 or (hi-lo)<1e-4: T0=mid; break
-        if f(lo)*fm<=0: hi=mid
-        else: lo=mid
-    else:
-        T0=mid
-    P0 = rh0*psat_mmhg(T0)
+        T0 = 0.5 * (T0_lo + T0_hi)
+        fm = f(T0)
+        if abs(fm) < 1e-4 or (T0_hi - T0_lo) < 1e-4:
+            break
+        if f(T0_lo) * fm <= 0:
+            T0_hi = T0
+        else:
+            T0_lo = T0
+    
+    P0 = rh0 * psat_mmhg(T0)
+    Tj = TA - Tratio * (TA - T0)
+    
+    # Calculate Pj from pressure ratio (Eq 21)
+    Pj = PA - Tratio * (PA - P0)
 
     # Jet velocity ratio from spread model
     Vratio, Tratio_jet = jet_ratios(X0,D0,include_buoyancy,TA,T0)
-
-    # Target state from intersection of operating line (A->0) with chosen acceptable line (Vj)
-    # This keeps report values consistent with charted ASHRAE lines.
-    if abs(T0 - TA) < 1e-9:
-        Tj = T0
-        Pj = P0
-    else:
-        a_mix = (P0 - PA) / (T0 - TA)
-        b_mix = PA - a_mix * TA
-        denom = a_mix + m
-        if abs(denom) < 1e-9:
-            # Fallback to jet-ratio estimate if lines are nearly parallel
-            Tj = TA - Tratio_jet*(TA - T0)
-            Pj = PA - Tratio_jet*(PA - P0)
-        else:
-            Tj = (C - b_mix) / denom
-            Pj = a_mix * Tj + b_mix
 
     # Effective thermal ratio consistent with final Tj/T0 used
     if abs(TA - T0) < 1e-9:
@@ -265,23 +276,9 @@ def solve_case_from_selected_target(TA, RH_A, Tmr, Vj, M, Icl, D0, X0,
                 V0=V0, Q0=Q0, Qj=Qj, Qe=Qe, m_dot0=m_dot0, Q_total=Q_total, Q_sens=Q_sens)
 
 # Psychrometric chart helper functions
-def get_acceptable_line_points(Vj, T_range=(0, 50), p_atm_kpa=101.325):
+def get_acceptable_line_points(Vj, Icl, M, Tmr, T_range=(0, 50), p_atm_kpa=101.325):
     """Generate (T, W) points for acceptable line at given Vj"""
-    vj_table = [0.5, 1.0, 1.5, 2.0]
-    m_table = [0.709, 0.722, 0.731, 0.737]
-    c_table = [43.03, 48.66, 51.60, 52.85]
-    
-    if Vj <= vj_table[0]:
-        m, C = m_table[0], c_table[0]
-    elif Vj >= vj_table[-1]:
-        m, C = m_table[-1], c_table[-1]
-    else:
-        for i in range(len(vj_table)-1):
-            if vj_table[i] <= Vj <= vj_table[i+1]:
-                w = (Vj - vj_table[i]) / (vj_table[i+1] - vj_table[i])
-                m = m_table[i] + w * (m_table[i+1] - m_table[i])
-                C = c_table[i] + w * (c_table[i+1] - c_table[i])
-                break
+    m, C, _ = acceptable_line(Icl, M, Vj, Tmr)
     
     T_vals = np.linspace(T_range[0], T_range[1], 100)
     P_vals = -m * T_vals + C
@@ -300,31 +297,22 @@ def get_physiological_line_points(T_range=(0, 50), rh0=0.95, p_atm_kpa=101.325):
 def get_saturation_line_points(T_range=(0, 50), p_atm_kpa=101.325):
     """Generate (T, W) points for saturation curve (RH = 100%)"""
     T_vals = np.linspace(T_range[0], T_range[1], 100)
-    try:
-        # Psy_TdbRH returns: [Tdb, Twb, RH, W*1000, v, h, Tdp, pw]
-        result = Psy_TdbRH(T_vals, 100.0, p_atm_kpa)
-        W_vals = result[:, 3] / 1000.0  # Convert from g/kg to kg/kg
-        return T_vals, W_vals
-    except Exception as e:
-        print(f"Warning: Error in saturation line: {e}")
-        return T_vals, np.full_like(T_vals, np.nan)
+    pv_vals = np.array([psat_mmhg(float(T)) for T in T_vals], dtype=float)
+    W_vals = np.array([humidity_ratio_from_pv(max(0.1, pv), p_atm_kpa) for pv in pv_vals], dtype=float)
+    return T_vals, W_vals
 
 def get_constant_rh_points(RH, T_range=(0, 50), p_atm_kpa=101.325):
     """Generate (T, W) points for constant RH line"""
     T_vals = np.linspace(T_range[0], T_range[1], 100)
-    try:
-        # Psy_TdbRH returns: [Tdb, Twb, RH, W*1000, v, h, Tdp, pw]
-        result = Psy_TdbRH(T_vals, RH, p_atm_kpa)
-        W_vals = result[:, 3] / 1000.0  # Convert from g/kg to kg/kg
-        return T_vals, W_vals
-    except Exception as e:
-        print(f"Warning: Error in RH={RH}% line: {e}")
-        return T_vals, np.full_like(T_vals, np.nan)
+    rh_frac = float(RH) / 100.0
+    pv_vals = np.array([rh_frac * psat_mmhg(float(T)) for T in T_vals], dtype=float)
+    W_vals = np.array([humidity_ratio_from_pv(max(0.1, pv), p_atm_kpa) for pv in pv_vals], dtype=float)
+    return T_vals, W_vals
 
 # Matplotlib chart widget
 class PsychroChart(FigureCanvas):
     def __init__(self, parent=None, Icl=0.6, M=87, Tmr=45, p_atm_kpa=101.325):
-        self.fig = Figure(figsize=(8, 6), dpi=90, tight_layout=True)
+        self.fig = Figure(figsize=(8, 6), dpi=90)
         self.ax = self.fig.add_subplot(111)
         super().__init__(self.fig)
         self.setParent(parent)
@@ -340,9 +328,18 @@ class PsychroChart(FigureCanvas):
         self._sat_W_g = None
         self._curve_cache = {}
         self.operating_solution = None
-        self._layout_initialized = False
+        self._startup_full_render_done = False
         self.mpl_connect('button_press_event', self.on_click)
-        self.update_chart()
+        # Fast first paint (without heavy psychrometric background), then full render
+        QtCore.QTimer.singleShot(0, self._render_startup_chart)
+
+    def _render_startup_chart(self):
+        self.update_chart(skip_psychro_background=True)
+        QtCore.QTimer.singleShot(10, self._render_full_startup_chart)
+
+    def _render_full_startup_chart(self):
+        self._startup_full_render_done = True
+        self.update_chart(skip_psychro_background=False)
 
     def clear_operating_solution(self):
         self.operating_solution = None
@@ -464,38 +461,43 @@ class PsychroChart(FigureCanvas):
         self._clear_selection_artists()
         self.fig.canvas.draw_idle()
         
-    def update_chart(self):
+    def update_chart(self, skip_psychro_background=False):
         self.ax.clear()
-        curves = self._get_cached_psychro_curves()
+        curves = None if skip_psychro_background else self._get_cached_psychro_curves()
         
         # Plot saturation line (RH = 100%) - no label to keep chart clean
-        try:
-            sat_curve = curves.get('sat')
-            if sat_curve is None:
-                raise ValueError('Missing saturation curve')
-            T_sat, W_sat = sat_curve
-            self._sat_T = T_sat
-            self._sat_W_g = W_sat * 1000.0
-            self.ax.plot(T_sat, W_sat*1000, 'k-', linewidth=1.6, alpha=0.85, zorder=2)
-        except Exception as e:
-            print(f"Warning: Could not plot saturation line: {e}")
+        if curves is not None:
+            try:
+                sat_curve = curves.get('sat')
+                if sat_curve is None:
+                    raise ValueError('Missing saturation curve')
+                T_sat, W_sat = sat_curve
+                self._sat_T = T_sat
+                self._sat_W_g = W_sat * 1000.0
+                self.ax.plot(T_sat, W_sat*1000, color='#808080', linestyle='-', linewidth=1.5, alpha=0.75, zorder=2)
+            except Exception as e:
+                print(f"Warning: Could not plot saturation line: {e}")
+                self._sat_T = None
+                self._sat_W_g = None
+        else:
             self._sat_T = None
             self._sat_W_g = None
         
         # Plot constant RH lines (10%, 20%, 30%,...90%) - no label to keep chart clean
         rh_values = [10, 20, 30, 40, 50, 60, 70, 80, 90]
-        colors_rh = ['#f0f0f0', '#e8e8e8', '#dcdcdc', '#d0d0d0', '#c0c0c0', '#b0b0b0', '#a0a0a0', '#909090', '#808080']
+        rh_color = '#808080'
         
-        for rh, color in zip(rh_values, colors_rh):
-            try:
-                rh_curve = curves['rh'].get(rh)
-                if rh_curve is None:
-                    raise ValueError(f'Missing RH={rh}% curve')
-                T_rh, W_rh = rh_curve
-                self.ax.plot(T_rh, W_rh*1000, color=color, linewidth=1.3, linestyle=':',
-                            zorder=1, alpha=0.75)
-            except Exception as e:
-                print(f"Warning: Could not plot RH={rh}% line: {e}")
+        if curves is not None:
+            for rh in rh_values:
+                try:
+                    rh_curve = curves['rh'].get(rh)
+                    if rh_curve is None:
+                        raise ValueError(f'Missing RH={rh}% curve')
+                    T_rh, W_rh = rh_curve
+                    self.ax.plot(T_rh, W_rh*1000, color=rh_color, linewidth=1.3, linestyle=':',
+                                zorder=1, alpha=0.75)
+                except Exception as e:
+                    print(f"Warning: Could not plot RH={rh}% line: {e}")
         
         # Plot acceptable lines for each Vj
         colors = ['#1f77b4', '#2ca02c', '#ff7f0e', '#d62728']  # Blue, green, orange, red
@@ -504,7 +506,9 @@ class PsychroChart(FigureCanvas):
         line_widths = [2.0, 2.2, 2.4, 2.6]
         
         for vj, color, ls, lw in zip(vj_list, colors, line_styles, line_widths):
-            T_vals, W_vals, m, C = get_acceptable_line_points(vj, p_atm_kpa=self.p_atm_kpa)
+            T_vals, W_vals, m, C = get_acceptable_line_points(
+                vj, self.Icl, self.M, self.Tmr, p_atm_kpa=self.p_atm_kpa
+            )
             self.ax.plot(T_vals, W_vals*1000, color=color, linewidth=lw, linestyle=ls, 
                         label=f'V_j = {vj} m/s', zorder=3, alpha=0.85)
             
@@ -569,10 +573,8 @@ class PsychroChart(FigureCanvas):
         self.ax.set_facecolor('#ffffff')
         self.fig.patch.set_facecolor('white')
         
-        # Tight layout is expensive; run once to avoid first-interaction stalls
-        if not self._layout_initialized:
-            self.fig.tight_layout()
-            self._layout_initialized = True
+        # Fixed margins are faster and avoid tight_layout warnings on startup
+        self.fig.subplots_adjust(left=0.10, right=0.98, bottom=0.11, top=0.90)
 
         # Draw selected point overlay (if any) without affecting static chart content
         self._draw_selection_overlay()
@@ -665,7 +667,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.e_X0=QtWidgets.QDoubleSpinBox(); self.e_X0.setRange(0.3,4.0); self.e_X0.setSingleStep(0.01); self.e_X0.setValue(3.048); self.e_X0.setSuffix(' m')  # 10 ft (ASHRAE Example 1)
         self.e_RT=QtWidgets.QDoubleSpinBox(); self.e_RT.setRange(0.1,1.0); self.e_RT.setSingleStep(0.01); self.e_RT.setValue(0.3048); self.e_RT.setSuffix(' m')
         self.e_ang=QtWidgets.QDoubleSpinBox(); self.e_ang.setRange(5,45); self.e_ang.setValue(22.0); self.e_ang.setSuffix(' deg')
-        self.btn_calcX0=QtWidgets.QPushButton('Calc X0 from Rt & angle')
+        self.cb_geom_mode=QtWidgets.QComboBox()
+        self.cb_geom_mode.addItems(['Calculate X0 from Rt', 'Calculate Rt from X0'])
+        self.btn_calcX0=QtWidgets.QPushButton('Calculate geometry')
         self.e_RH0=QtWidgets.QDoubleSpinBox(); self.e_RH0.setRange(80,100); self.e_RH0.setValue(95.0); self.e_RH0.setSuffix(' %')
         self.e_T0_inv=QtWidgets.QDoubleSpinBox(); self.e_T0_inv.setRange(-50,80); self.e_T0_inv.setDecimals(2); self.e_T0_inv.setReadOnly(True); self.e_T0_inv.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons); self.e_T0_inv.setSuffix(' C')
         self.e_P0_inv=QtWidgets.QDoubleSpinBox(); self.e_P0_inv.setRange(0,100); self.e_P0_inv.setDecimals(3); self.e_P0_inv.setReadOnly(True); self.e_P0_inv.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons); self.e_P0_inv.setSuffix(' mmHg')
@@ -698,7 +702,7 @@ class MainWindow(QtWidgets.QMainWindow):
         form.addRow(QtWidgets.QLabel('<b>Work & clothing</b>'))
         form.addRow('M:', self.e_M); form.addRow('I_cl:', self.e_ICL)
         form.addRow(QtWidgets.QLabel('<b>Jet geometry</b>'))
-        form.addRow('D_0:', self.e_D0); form.addRow('X_0:', self.e_X0); form.addRow('R_t:', self.e_RT); form.addRow('Angle:', self.e_ang); form.addRow(self.btn_calcX0)
+        form.addRow('D_0:', self.e_D0); form.addRow('X_0:', self.e_X0); form.addRow('R_t:', self.e_RT); form.addRow('Angle:', self.e_ang); form.addRow('Geometry mode:', self.cb_geom_mode); form.addRow(self.btn_calcX0)
         form.addRow(QtWidgets.QLabel('<b>Coil/nozzle</b>'))
         form.addRow('rh_0:', self.e_RH0)
         form.addRow(QtWidgets.QLabel('<b>From selected point (inverse)</b>'))
@@ -711,7 +715,8 @@ class MainWindow(QtWidgets.QMainWindow):
         form.addRow(self.lbl_selected)
         
         # signals
-        self.btn_calcX0.clicked.connect(self.calc_x0_from_rt)
+        self.btn_calcX0.clicked.connect(self.calc_geometry)
+        self.cb_geom_mode.currentIndexChanged.connect(self.on_geometry_mode_changed)
         self.btn_run.clicked.connect(self.run_calc)
         self.btn_use_selected.clicked.connect(self.use_selected_point)
         self.btn_pdf.clicked.connect(self.export_pdf)
@@ -724,6 +729,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.e_M.valueChanged.connect(self.on_chart_params_changed)
         self.e_ICL.valueChanged.connect(self.on_chart_params_changed)
         self.e_PATM.valueChanged.connect(self.on_chart_params_changed)
+        self.on_geometry_mode_changed()
 
     def _is_physical_solution(self, r, TA=None):
         vals = [r.get('T0'), r.get('Tj'), r.get('P0'), r.get('Pj'), r.get('RH_0'), r.get('RH_j')]
@@ -744,15 +750,43 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         return True
 
-    def calc_x0_from_rt(self):
-        Rt=self.e_RT.value(); D0=self.e_D0.value(); ang=self.e_ang.value()*math.pi/180.0
-        a=0.5/D0; b=math.tan(ang); c=-Rt
-        disc=b*b-4*a*c
-        if disc<=0:
-            QtWidgets.QMessageBox.warning(self,'Geometry','No real solution for X0.')
+    def on_geometry_mode_changed(self):
+        """Switch which geometry variable is calculated vs entered by user"""
+        mode = self.cb_geom_mode.currentIndex() if hasattr(self, 'cb_geom_mode') else 0
+        calc_x0 = (mode == 0)
+        self.e_X0.setReadOnly(calc_x0)
+        self.e_RT.setReadOnly(not calc_x0)
+        self.e_X0.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons if calc_x0 else QtWidgets.QAbstractSpinBox.UpDownArrows)
+        self.e_RT.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons if not calc_x0 else QtWidgets.QAbstractSpinBox.UpDownArrows)
+
+    def calc_geometry(self):
+        Rt = self.e_RT.value()
+        D0 = self.e_D0.value()
+        ang_deg = self.e_ang.value()
+        tan_half = math.tan(math.radians(ang_deg / 2.0))
+
+        if tan_half <= 1e-12:
+            QtWidgets.QMessageBox.warning(self, 'Geometry', 'Angle must be greater than 0° for geometry calculation.')
             return
-        x1=(-b+disc**0.5)/(2*a); x2=(-b-disc**0.5)/(2*a)
-        X0=max(x1,x2); self.e_X0.setValue(X0)
+
+        # Formula: Rt/X0 = tan(theta/2) + 0.5/(X0/D0)
+        # Rearranged forms:
+        #   Rt = X0*tan(theta/2) + 0.5*D0
+        #   X0 = (Rt - 0.5*D0)/tan(theta/2)
+        if self.cb_geom_mode.currentIndex() == 0:
+            num = Rt - 0.5 * D0
+            if num <= 0.0:
+                QtWidgets.QMessageBox.warning(self, 'Geometry', 'Rt must be greater than D0/2 to compute X0.')
+                return
+            X0 = num / tan_half
+            self.e_X0.setValue(X0)
+        else:
+            X0 = self.e_X0.value()
+            Rt_calc = X0 * tan_half + 0.5 * D0
+            if Rt_calc <= 0:
+                QtWidgets.QMessageBox.warning(self, 'Geometry', 'Calculated Rt is not physically valid.')
+                return
+            self.e_RT.setValue(Rt_calc)
 
     def on_chart_params_changed(self):
         """Update chart when input parameters change"""
@@ -868,6 +902,9 @@ class MainWindow(QtWidgets.QMainWindow):
         """
         rows = [
             ('V_j (used)', fmt(self.e_VJ.value(),3), 'm/s'),
+            ('m (calculated)', fmt(r['m'],4), 'mmHg/C'),
+            ('C (calculated)', fmt(r['C'],3), 'mmHg'),
+            ('T_a(0.5)', fmt(r['Ta50'],2), 'C'),
             ('T_0', fmt(r['T0'],3), 'C'),
             ('P_0', fmt(r['P0'],3), 'mmHg'),
             ('RH_0', fmt(r['RH_0']*100,2), '%'),
@@ -887,7 +924,6 @@ class MainWindow(QtWidgets.QMainWindow):
         for k,v,u in rows:
             html += f"<tr><td class='left'>{k}</td><td>{v}</td><td>{u}</td></tr>"
         html += "</table>"
-        html += f"<p>m={fmt(r['m'],4)} mmHg/C; C={fmt(r['C'],3)} mmHg; T_a(0.5)={fmt(r['Ta50'],2)} C.</p>"
         html += "</body></html>"
         return html
 
