@@ -12,9 +12,92 @@ from matplotlib.figure import Figure
 
 class CFDVisualizerWidget(FigureCanvas):
     """Widget to display 2D jet CFD results"""
+
+    @staticmethod
+    def compute_focus_xlim(velocity_m_s, x_coords, color_max, threshold_ratio=0.03):
+        """
+        Estimate symmetric x-limits around the active jet region.
+
+        This keeps the plot readable while preserving physical aspect ratio.
+        """
+        if velocity_m_s is None or velocity_m_s.size == 0:
+            return None
+
+        ny, nx = velocity_m_s.shape
+        if nx < 3:
+            return None
+
+        threshold = max(float(color_max) * float(threshold_ratio), 1e-6)
+        col_max = np.nanmax(velocity_m_s, axis=0)
+        active_cols = np.where(col_max >= threshold)[0]
+        if active_cols.size < 2:
+            return None
+
+        pad = max(2, int(0.08 * nx))
+        left = max(0, int(active_cols[0]) - pad)
+        right = min(nx - 1, int(active_cols[-1]) + pad)
+
+        half_span = max(abs(float(x_coords[left])), abs(float(x_coords[right])))
+        domain_half = max(abs(float(x_coords[0])), abs(float(x_coords[-1])))
+        half_span = min(max(half_span, 1e-6), domain_half)
+
+        return (-half_span, half_span)
+
+    @staticmethod
+    def compute_visible_velocity_max(velocity_m_s, percentile=99.9, reference_velocity=None):
+        """
+        Compute a robust maximum for visualization, excluding edge cells and spikes.
+
+        Args:
+            velocity_m_s: Velocity magnitude field in m/s
+            percentile: High percentile used as visible max
+            reference_velocity: Optional reference speed (e.g. V0) in m/s
+
+        Returns:
+            Robust visible maximum velocity in m/s
+        """
+        arr = np.asarray(velocity_m_s, dtype=np.float64)
+        if arr.size == 0:
+            return 1e-6
+
+        # Drop one-cell border where BC artifacts are most common.
+        if arr.shape[0] > 2 and arr.shape[1] > 2:
+            arr_core = arr[1:-1, 1:-1]
+        else:
+            arr_core = arr
+
+        finite_vals = arr_core[np.isfinite(arr_core)]
+        if finite_vals.size == 0:
+            return 1e-6
+
+        finite_vals = np.clip(finite_vals, 0.0, None)
+
+        # Focus percentile on the active jet region (exclude near-zero ambient values).
+        if reference_velocity is not None and reference_velocity > 0.0:
+            active_threshold = 0.05 * float(reference_velocity)
+            active_vals = finite_vals[finite_vals >= active_threshold]
+            if active_vals.size >= 10:
+                vals_for_percentile = active_vals
+            else:
+                vals_for_percentile = finite_vals[finite_vals > 0.0]
+        else:
+            vals_for_percentile = finite_vals[finite_vals > 0.0]
+
+        if vals_for_percentile.size == 0:
+            vals_for_percentile = finite_vals
+
+        robust_max = float(np.percentile(vals_for_percentile, percentile))
+        if not np.isfinite(robust_max) or robust_max <= 0.0:
+            robust_max = float(np.max(finite_vals))
+
+        # Keep physical readability when a reference velocity exists.
+        if reference_velocity is not None and reference_velocity > 0.0:
+            robust_max = max(robust_max, float(reference_velocity))
+
+        return max(robust_max, 1e-6)
     
     def __init__(self, parent=None):
-        self.fig = Figure(figsize=(10, 6), dpi=90)
+        self.fig = Figure(figsize=(13, 8), dpi=100)
         self.ax = self.fig.add_subplot(111)
         super().__init__(self.fig)
         self.setParent(parent)
@@ -25,27 +108,62 @@ class CFDVisualizerWidget(FigureCanvas):
         self.uy_data = None
         self.rho_data = None
         self.lattice_spacing = 1.0
+        self.color_max_m_s = None
+        self.x0_distance_m = None
+        self.x_zero_index = None
+        self.x_domain_limits = None
         
-    def set_simulation_data(self, velocity, ux, uy, rho, lattice_spacing=1.0):
+    def set_simulation_data(
+        self,
+        velocity,
+        ux,
+        uy,
+        rho,
+        lattice_spacing=1.0,
+        velocity_scale=1.0,
+        color_max_m_s=None,
+        x0_distance_m=None,
+        x_zero_index=None,
+        x_domain_limits=None,
+    ):
         """
         Set simulation results for visualization.
         
+        Data is used directly without transposition:
+        - x (horizontal) = radial direction
+        - y (vertical) = axial direction (downward when inverted)
+        
         Args:
-            velocity: Velocity magnitude field [ny, nx]
-            ux: X-velocity component [ny, nx]
-            uy: Y-velocity component [ny, nx]
+            velocity: Velocity magnitude field [ny, nx] (lattice units)
+            ux: X-velocity component (radial) [ny, nx] (lattice units)
+            uy: Y-velocity component (axial) [ny, nx] (lattice units)
             rho: Density field [ny, nx]
             lattice_spacing: Physical spacing between lattice nodes (meters)
+            velocity_scale: Conversion factor from lattice to m/s
+            color_max_m_s: Optional upper bound for color scale in m/s
         """
-        self.velocity_data = velocity
-        self.ux_data = ux
-        self.uy_data = uy
+        # No transposition - use data as-is
+        # Shape is (ny, nx) which matches matplotlib's (y, x) convention
+        self.velocity_data = velocity * velocity_scale  # Convert to m/s
+        self.ux_data = ux * velocity_scale  # Radial velocity
+        self.uy_data = uy * velocity_scale  # Axial velocity (downward)
         self.rho_data = rho
         self.lattice_spacing = lattice_spacing
+        self.color_max_m_s = color_max_m_s
+        self.x0_distance_m = x0_distance_m
+        self.x_zero_index = x_zero_index
+        self.x_domain_limits = x_domain_limits
         self.update_visualization()
     
     def update_visualization(self):
-        """Redraw visualization with current data"""
+        """
+        Redraw visualization with current data.
+        
+        Domain layout:
+        - X (horizontal): radial direction, centered at 0
+        - Y (vertical): axial direction from ceiling (top) downward
+        - Data format: [ny, nx] - rows are y positions, columns are x positions
+        """
         self.ax.clear()
         
         if self.velocity_data is None:
@@ -55,36 +173,126 @@ class CFDVisualizerWidget(FigureCanvas):
             return
         
         ny, nx = self.velocity_data.shape
-        xx = np.arange(nx) * self.lattice_spacing
-        yy = np.arange(ny) * self.lattice_spacing - (ny / 2.0) * self.lattice_spacing
+        
+        # Create meshgrid: x = radial with configurable origin index for x=0.
+        x0_idx = float(self.x_zero_index) if self.x_zero_index is not None else (nx / 2.0)
+        xx = (np.arange(nx) - x0_idx) * self.lattice_spacing
+        yy = np.arange(ny) * self.lattice_spacing  # Axial: from ceiling (0) downward
         XX, YY = np.meshgrid(xx, yy)
         
-        # Plot velocity magnitude as contours + colormap
-        levels = np.linspace(0, np.max(self.velocity_data) * 0.9, 20)
-        contourf = self.ax.contourf(XX, YY, self.velocity_data, levels=levels, cmap='hot')
-        contour = self.ax.contour(XX, YY, self.velocity_data, levels=levels[::2], 
-                                 colors='black', alpha=0.3, linewidths=0.5)
+        # White background - no fill
+        self.ax.set_facecolor('white')
+        self.fig.patch.set_facecolor('white')
         
-        cbar = self.fig.colorbar(contourf, ax=self.ax, label='Velocity Magnitude')
+        # Colored contour LINES only (no fill) with robust max to suppress spikes.
+        data_visible_max = self.compute_visible_velocity_max(
+            self.velocity_data,
+            percentile=99.9,
+            reference_velocity=self.color_max_m_s,
+        )
+        if self.color_max_m_s is not None:
+            # Never hide the robust maximum even if an external cap is passed.
+            color_max = max(float(self.color_max_m_s), data_visible_max)
+        else:
+            color_max = data_visible_max
+        color_max = max(color_max, 1e-6)
+        velocity_for_plot = np.clip(self.velocity_data, 0.0, color_max)
+
+        # Start above zero to avoid zero-level loops at domain boundaries.
+        level_min = max(color_max / 200.0, 1e-6)
+        levels = np.linspace(level_min, color_max, 15)
+        contour = self.ax.contour(XX, YY, velocity_for_plot, levels=levels,
+                                 cmap='plasma', linewidths=2.0, alpha=1.0)
+
+        # Label only a subset of levels and skip the top strip to avoid clutter at ceiling.
+        label_levels = levels[1::2]
+        label_field = velocity_for_plot.copy()
+        top_rows_to_skip = max(1, int(0.08 * ny))
+        label_field[:top_rows_to_skip, :] = np.nan
+        label_contour = self.ax.contour(
+            XX,
+            YY,
+            label_field,
+            levels=label_levels,
+            colors='black',
+            linewidths=0.0,
+            alpha=0.0,
+        )
+        self.ax.clabel(
+            label_contour,
+            label_levels,
+            inline=True,
+            inline_spacing=2,
+            fontsize=10,
+            fmt='%.2f',
+            colors='black',
+        )
         
-        # Streamlines
-        # Sample velocity field for better visualization
-        stride = 2
+        # Add colorbar to show velocity scale
+        cbar = self.fig.colorbar(contour, ax=self.ax, label='Velocity Magnitude (m/s)')
+        
+        # Streamlines: white, subtle, just to show flow direction
+        stride = max(1, ny // 20)
         ux_sample = self.ux_data[::stride, ::stride]
         uy_sample = self.uy_data[::stride, ::stride]
         XX_sample = XX[::stride, ::stride]
         YY_sample = YY[::stride, ::stride]
         
-        self.ax.streamplot(XX_sample, YY_sample, ux_sample, uy_sample, 
-                          color='white', linewidth=0.8, density=1.5, arrowsize=1.5)
+        self.ax.streamplot(XX_sample, YY_sample, ux_sample, uy_sample,
+                          color='lightgray', linewidth=0.7, density=1.5, 
+                          arrowsize=1.5, arrowstyle='->')
         
         # Formatting
-        self.ax.set_xlabel('Axial Distance (m)', fontsize=11, weight='bold')
-        self.ax.set_ylabel('Radial Distance (m)', fontsize=11, weight='bold')
-        self.ax.set_title('2D Jet Velocity Field (LBM Simulation)', 
+        self.ax.set_xlabel('Radial Distance (m)', fontsize=11, weight='bold')
+        self.ax.set_ylabel('Axial Distance (m) [Ceiling at Top, Flow Down]', fontsize=11, weight='bold')
+        self.ax.set_title('2D Jet Velocity Field from Ceiling Diffuser (LBM Simulation)', 
                          fontsize=12, weight='bold')
-        self.ax.set_aspect('equal')
-        self.ax.grid(True, alpha=0.3, linestyle=':')
+        # Keep physical proportions (no geometric deformation).
+        self.ax.set_aspect('equal', adjustable='box')
+
+        # Respect explicit user-defined domain limits when available.
+        if self.x_domain_limits is not None:
+            x_left, x_right = self.x_domain_limits
+            if x_left < x_right:
+                self.ax.set_xlim(float(x_left), float(x_right))
+        else:
+            # Auto-focus x-range around active jet so equal aspect remains readable.
+            focus_xlim = self.compute_focus_xlim(velocity_for_plot, xx, color_max)
+            if focus_xlim is not None:
+                self.ax.set_xlim(*focus_xlim)
+
+        self.ax.grid(True, alpha=0.2, linestyle=':', color='gray')
+        
+        # Invert y-axis: y=0 at top (ceiling), increasing downward
+        self.ax.invert_yaxis()
+
+        # Mark X0 distance from ceiling if provided and inside visible y-range.
+        if self.x0_distance_m is not None:
+            y_min, y_max = self.ax.get_ylim()
+            y_low = min(y_min, y_max)
+            y_high = max(y_min, y_max)
+            x0 = float(self.x0_distance_m)
+            if y_low <= x0 <= y_high:
+                self.ax.axhline(
+                    y=x0,
+                    color='dimgray',
+                    linestyle='--',
+                    linewidth=1.5,
+                    alpha=0.9,
+                    zorder=6,
+                )
+                x_left, x_right = self.ax.get_xlim()
+                self.ax.text(
+                    x_left + 0.01 * (x_right - x_left),
+                    x0,
+                    f'X0 = {x0:.2f} m',
+                    fontsize=10,
+                    color='dimgray',
+                    ha='left',
+                    va='bottom',
+                    bbox=dict(facecolor='white', edgecolor='none', alpha=0.65, pad=1.5),
+                    zorder=7,
+                )
         
         self.fig.tight_layout()
         self.fig.canvas.draw_idle()
@@ -96,7 +304,7 @@ class CFDResultsDialog(QtWidgets.QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle('CFD Simulation Results - 2D Jet')
-        self.resize(1000, 700)
+        self.resize(1350, 900)
         
         layout = QtWidgets.QVBoxLayout(self)
         
@@ -129,14 +337,60 @@ class CFDResultsDialog(QtWidgets.QDialog):
         self.btn_close.clicked.connect(self.close)
         layout.addWidget(self.btn_close)
     
-    def set_results(self, velocity, ux, uy, rho, reynolds, mach, 
-                   jet_diameter_physical, lattice_spacing=1.0):
-        """Set and display simulation results"""
-        self.visualizer.set_simulation_data(velocity, ux, uy, rho, lattice_spacing)
+    def set_results(
+        self,
+        velocity,
+        ux,
+        uy,
+        rho,
+        reynolds,
+        mach,
+        jet_diameter_physical,
+        inlet_velocity=None,
+        axial_distance_x0=None,
+        x_zero_index=None,
+        x_domain_limits=None,
+        lattice_spacing=1.0,
+        velocity_scale=1.0,
+    ):
+        """
+        Set and display simulation results.
+        
+        Args:
+            velocity_scale: Conversion factor from lattice units to m/s
+        """
+        velocity_m_s = velocity * velocity_scale
+        raw_max = float(np.max(velocity_m_s))
+        visible_max = self.visualizer.compute_visible_velocity_max(
+            velocity_m_s,
+            percentile=99.9,
+            reference_velocity=inlet_velocity,
+        )
+
+        self.visualizer.set_simulation_data(
+            velocity,
+            ux,
+            uy,
+            rho,
+            lattice_spacing,
+            velocity_scale,
+            color_max_m_s=visible_max,
+            x0_distance_m=axial_distance_x0,
+            x_zero_index=x_zero_index,
+            x_domain_limits=x_domain_limits,
+        )
         
         # Update statistics
-        max_vel = np.max(velocity)
-        self.lbl_max_velocity.setText(f'Max Velocity: {max_vel:.4f} m/s')
+        max_vel = raw_max
+        if inlet_velocity is not None:
+            self.lbl_max_velocity.setText(
+                f'Max Velocity (visible, P99.9): {visible_max:.4f} m/s | '
+                f'Raw: {max_vel:.4f} m/s | V0: {inlet_velocity:.4f} m/s'
+            )
+        else:
+            self.lbl_max_velocity.setText(
+                f'Max Velocity (visible, P99.9): {visible_max:.4f} m/s | Raw: {max_vel:.4f} m/s'
+            )
         self.lbl_reynolds.setText(f'Reynolds: {reynolds:.1f}')
         self.lbl_mach.setText(f'Mach: {mach:.4f}')
         self.lbl_jet_diameter.setText(f'Jet Diameter: {jet_diameter_physical:.4f} m')

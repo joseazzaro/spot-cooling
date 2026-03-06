@@ -27,50 +27,107 @@ class CFDSimulationController:
         self.last_results = None
     
     def create_simulator_from_cooling_params(self, jet_diameter_m, inlet_velocity_m_s,
-                                           ambient_density_kg_m3, ambient_viscosity):
+                                           ambient_density_kg_m3, ambient_viscosity,
+                                           room_height_m=3.0,
+                                           radial_left_extent_m=None,
+                                           radial_right_extent_m=None):
         """
         Create LBM simulator with parameters from cooling calculation.
+        
+        Grid size and spacing are automatically scaled based on jet diameter and room height.
+        Ensures domain is large enough to capture full jet development or fill room.
+        
+        Physical parameters are scaled to LBM lattice units:
+        - Lattice Reynolds is normalized to ~500 for stability
+        - Lattice Mach is set to 0.1 for low-Mach incompressible assumption
         
         Args:
             jet_diameter_m: Physical jet diameter [meters]
             inlet_velocity_m_s: Inlet velocity [m/s]
             ambient_density_kg_m3: Air density at ambient conditions [kg/m³]
             ambient_viscosity: Air kinematic viscosity [m²/s]
+            room_height_m: Physical room height [meters] (for domain scaling)
         
         Returns:
             LBM2DJetSimulator instance
         """
-        # Calculate Reynolds number based on jet parameters
-        reynolds = (inlet_velocity_m_s * jet_diameter_m) / ambient_viscosity
+        # Calculate physical Reynolds number for reference
+        reynolds_physical = (inlet_velocity_m_s * jet_diameter_m) / ambient_viscosity
         
-        # Mach number (for subsonic jet, typically << 1)
-        speed_of_sound = 343.0  # m/s at 20°C (approx)
-        mach = inlet_velocity_m_s / speed_of_sound
+        # Adaptive grid sizing based on jet diameter and room height.
+        # Goal: jet diameter = ~4 lattice cells.
+        cells_per_diameter = 4.0
         
-        # Clamp Mach to valid range for isothermal solver
-        mach = min(mach, 0.3)
+        # Axial domain = room height (use actual room height, not forced minimum)
+        domain_height_diameters = room_height_m / jet_diameter_m
         
-        # Create simulator (default 80x50 grid)
-        self.simulator = LBM2DJetSimulator(nx=80, ny=50, 
-                                          reynolds_number=reynolds,
-                                          mach_number=mach)
+        # Calculate lattice spacing to achieve these goals
+        lattice_spacing = jet_diameter_m / cells_per_diameter
+        
+        # Radial domain extents from x=0 (jet axis) to each side.
+        if radial_left_extent_m is None or radial_right_extent_m is None:
+            default_half_width_m = 100.0 * jet_diameter_m
+            radial_left_extent_m = default_half_width_m
+            radial_right_extent_m = default_half_width_m
+
+        min_side_extent = jet_diameter_m
+        self.radial_left_extent_m = max(float(radial_left_extent_m), min_side_extent)
+        self.radial_right_extent_m = max(float(radial_right_extent_m), min_side_extent)
+
+        # Ensure inlet is not too close to side boundaries (>= 4 cells).
+        min_side_cells = 4
+        min_side_m = min_side_cells * lattice_spacing
+        self.radial_left_extent_m = max(self.radial_left_extent_m, min_side_m)
+        self.radial_right_extent_m = max(self.radial_right_extent_m, min_side_m)
+
+        # Grid dimensions with integer cells per side so x=0 is exactly on a node.
+        left_cells = max(1, int(round(self.radial_left_extent_m / lattice_spacing)))
+        right_cells = max(1, int(round(self.radial_right_extent_m / lattice_spacing)))
+        nx = left_cells + right_cells + 1
+        ny = int(domain_height_diameters * cells_per_diameter)  # Axial extent
+
+        # Ensure minimum size for numerical stability
+        nx = max(nx, 17)
+        ny = ny if ny % 2 == 1 else ny + 1
+
+        # Lattice index where x=0 (jet centerline) is located.
+        self.jet_center_x_lattice = float(left_cells)
+
+        # Store realized extents after integer cell rounding.
+        self.radial_left_extent_m = left_cells * lattice_spacing
+        self.radial_right_extent_m = right_cells * lattice_spacing
+        
+        # For LBM, use a normalized lattice Reynolds (for numerical stability)
+        reynolds_lattice = 500.0
+        
+        # Lattice Mach number (use 0.1 for stability and accuracy)
+        mach_lattice = 0.1
+        
+        # Create simulator with adaptive grid
+        self.simulator = LBM2DJetSimulator(nx=nx, ny=ny, 
+                                          reynolds_number=reynolds_lattice,
+                                          mach_number=mach_lattice)
         
         # Store physical parameters for post-processing
         self.jet_diameter_physical = jet_diameter_m
         self.inlet_velocity_physical = inlet_velocity_m_s
         self.ambient_density = ambient_density_kg_m3
-        self.reynolds = reynolds
-        self.mach = mach
+        self.reynolds_physical = reynolds_physical  # Physical Re for validation
+        self.reynolds = reynolds_lattice  # Lattice Re
+        self.mach = mach_lattice  # Lattice Mach
+        self.lattice_spacing = lattice_spacing
+        self.room_height = room_height_m
         
         return self.simulator
     
-    def run_simulation(self, n_steps=500, callback=None):
+    def run_simulation(self, n_steps=500, callback=None, room_height_m=3.0):
         """
         Execute LBM simulation.
         
         Args:
             n_steps: Number of time steps to simulate (default 500, ~settling time)
             callback: Optional progress callback function(step, total_steps)
+            room_height_m: Physical room height in meters (for domain scaling)
         
         Returns:
             dict with results: velocity, ux, uy, rho fields
@@ -81,13 +138,16 @@ class CFDSimulationController:
         # Run simulation
         velocity, ux, uy, rho = self.simulator.run_simulation(
             n_steps=n_steps,
-            jet_center_y=self.simulator.ny / 2.0,
+            jet_center_x=self.jet_center_x_lattice,
             jet_radius=2.0,  # ~4-5 cells for jet diameter
             jet_velocity=self.simulator.u0,
             callback=callback
         )
         
-        # Store results
+        # Store results with scaling factor for visualization
+        # Velocity scaling: physical_velocity = lattice_velocity * (V_inlet / u_lattice)
+        velocity_scale = self.inlet_velocity_physical / self.simulator.u0 if self.simulator.u0 > 0 else 1.0
+        
         self.last_results = {
             'velocity': velocity,
             'ux': ux,
@@ -97,6 +157,11 @@ class CFDSimulationController:
             'mach': self.mach,
             'jet_diameter': self.jet_diameter_physical,
             'inlet_velocity': self.inlet_velocity_physical,
+            'velocity_scale': velocity_scale,  # Conversion factor: lattice to m/s
+            'lattice_spacing': self.lattice_spacing,  # For visualization scaling
+            'x_zero_index': self.jet_center_x_lattice,
+            'radial_left_extent_m': self.radial_left_extent_m,
+            'radial_right_extent_m': self.radial_right_extent_m,
         }
         
         return self.last_results
@@ -238,11 +303,16 @@ def create_cfd_from_cooling_solution(main_window, cooling_result):
     kinematic_viscosity = 1.8e-5  # m²/s at 20°C (approximate)
     
     # Create simulator with physical parameters
+    room_height_m = main_window.e_room_height.value()
+    
     controller.create_simulator_from_cooling_params(
         jet_diameter_m=D0,
         inlet_velocity_m_s=V0,
         ambient_density_kg_m3=1.225,  # kg/m³ at sea level
-        ambient_viscosity=kinematic_viscosity
+        ambient_viscosity=kinematic_viscosity,
+        room_height_m=room_height_m,
+        radial_left_extent_m=main_window.e_radial_left_extent.value(),
+        radial_right_extent_m=main_window.e_radial_right_extent.value(),
     )
     
     return controller

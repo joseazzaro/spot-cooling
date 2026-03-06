@@ -77,7 +77,8 @@ class MainWindow(QtWidgets.QMainWindow):
         spinboxes = [
             self.e_TA, self.e_RHA, self.e_TMR, self.e_VJ, self.e_M, self.e_ICL,
             self.e_D0, self.e_X0, self.e_RT, self.e_ang, self.e_RH0,
-            self.e_PATM
+            self.e_PATM, self.e_room_height, self.e_radial_left_extent,
+            self.e_radial_right_extent
         ]
         for spin in spinboxes:
             spin.setKeyboardTracking(False)
@@ -146,6 +147,26 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cb_geom_mode.addItems(['Calculate X0 from Rt', 'Calculate Rt from X0'])
         
         self.btn_calcX0 = QtWidgets.QPushButton('Calculate geometry')
+        
+        # Room height (for CFD simulation domain scaling)
+        self.e_room_height = QtWidgets.QDoubleSpinBox()
+        self.e_room_height.setRange(2.0, 10.0)
+        self.e_room_height.setSingleStep(0.1)
+        self.e_room_height.setValue(3.0)  # Default 3 meters
+        self.e_room_height.setSuffix(' m')
+
+        # CFD radial extent from x=0 to each side
+        self.e_radial_left_extent = QtWidgets.QDoubleSpinBox()
+        self.e_radial_left_extent.setRange(0.3, 50.0)
+        self.e_radial_left_extent.setSingleStep(0.1)
+        self.e_radial_left_extent.setValue(15.0)
+        self.e_radial_left_extent.setSuffix(' m')
+
+        self.e_radial_right_extent = QtWidgets.QDoubleSpinBox()
+        self.e_radial_right_extent.setRange(0.3, 50.0)
+        self.e_radial_right_extent.setSingleStep(0.1)
+        self.e_radial_right_extent.setValue(15.0)
+        self.e_radial_right_extent.setSuffix(' m')
         
         # Coil/nozzle
         self.e_RH0 = QtWidgets.QDoubleSpinBox()
@@ -216,6 +237,9 @@ class MainWindow(QtWidgets.QMainWindow):
         form.addRow('Angle:', self.e_ang)
         form.addRow('Geometry mode:', self.cb_geom_mode)
         form.addRow(self.btn_calcX0)
+        form.addRow('Room height:', self.e_room_height)
+        form.addRow('CFD left extent from x=0:', self.e_radial_left_extent)
+        form.addRow('CFD right extent from x=0:', self.e_radial_right_extent)
         
         # Coil/nozzle
         form.addRow(QtWidgets.QLabel('<b>Coil/nozzle</b>'))
@@ -578,8 +602,15 @@ class MainWindow(QtWidgets.QMainWindow):
             
             cfd_controller = create_cfd_from_cooling_solution(self, result)
             
+            # Pass room height to CFD controller for domain scaling
+            room_height = self.e_room_height.value()
+            
             # Run simulation
-            results = cfd_controller.run_simulation(n_steps=500, callback=update_progress)
+            results = cfd_controller.run_simulation(
+                n_steps=500, 
+                callback=update_progress,
+                room_height_m=room_height
+            )
             
             # Show results dialog
             dlg = CFDResultsDialog(self)
@@ -591,7 +622,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 reynolds=results['reynolds'],
                 mach=results['mach'],
                 jet_diameter_physical=results['jet_diameter'],
-                lattice_spacing=0.001  # 1mm lattice spacing
+                inlet_velocity=results.get('inlet_velocity'),
+                axial_distance_x0=self.e_X0.value(),
+                x_zero_index=results.get('x_zero_index'),
+                x_domain_limits=(-results.get('radial_left_extent_m', 0.0),
+                                 results.get('radial_right_extent_m', 0.0)),
+                lattice_spacing=results.get('lattice_spacing', 0.001),  # Adaptive spacing
+                velocity_scale=results.get('velocity_scale', 1.0)  # Conversion to m/s
             )
             
             progress.close()
