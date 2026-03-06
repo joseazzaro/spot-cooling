@@ -30,7 +30,8 @@ class CFDSimulationController:
                                            ambient_density_kg_m3, ambient_viscosity,
                                            room_height_m=3.0,
                                            radial_left_extent_m=None,
-                                           radial_right_extent_m=None):
+                                           radial_right_extent_m=None,
+                                           diffuser_angle_deg=0.0):
         """
         Create LBM simulator with parameters from cooling calculation.
         
@@ -117,6 +118,7 @@ class CFDSimulationController:
         self.mach = mach_lattice  # Lattice Mach
         self.lattice_spacing = lattice_spacing
         self.room_height = room_height_m
+        self.diffuser_angle_deg = float(diffuser_angle_deg)
         
         return self.simulator
     
@@ -141,7 +143,8 @@ class CFDSimulationController:
             jet_center_x=self.jet_center_x_lattice,
             jet_radius=2.0,  # ~4-5 cells for jet diameter
             jet_velocity=self.simulator.u0,
-            callback=callback
+            callback=callback,
+            diffuser_angle_deg=getattr(self, 'diffuser_angle_deg', 0.0),
         )
         
         # Store results with scaling factor for visualization
@@ -313,6 +316,7 @@ def create_cfd_from_cooling_solution(main_window, cooling_result):
         room_height_m=room_height_m,
         radial_left_extent_m=main_window.e_radial_left_extent.value(),
         radial_right_extent_m=main_window.e_radial_right_extent.value(),
+        diffuser_angle_deg=main_window.e_ang.value(),
     )
     
     return controller

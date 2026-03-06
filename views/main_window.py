@@ -19,6 +19,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setWindowTitle('Spot Cooling - ASHRAE')
         self.resize(1600, 900)
         self.last_report_html = None
+        self.selected_point_vj = None
         
         # Central widget layout
         cw = QtWidgets.QWidget()
@@ -375,41 +376,56 @@ class MainWindow(QtWidgets.QMainWindow):
             self.chart.p_atm_kpa = self.e_PATM.value()
             self.chart.update_chart()
     
-    def on_chart_selected(self, T_j, W_j):
+    def on_chart_selected(self, T_j, W_j, vj_selected=None):
         """Handle selection from psychrometric chart"""
         self.chart.selected_Tj_point = (T_j, W_j)
-        self.lbl_selected.setText(f'Selected: T_j={T_j:.1f}°C, W_j={W_j*1000:.2f} g/kg')
+        self.selected_point_vj = vj_selected
+        if vj_selected is None:
+            self.lbl_selected.setText(f'Selected: T_j={T_j:.1f}°C, W_j={W_j*1000:.2f} g/kg')
+        else:
+            self.lbl_selected.setText(
+                f'Selected: T_j={T_j:.1f}°C, W_j={W_j*1000:.2f} g/kg, V_j~{vj_selected:.3f} m/s'
+            )
         self.btn_use_selected.setEnabled(True)
     
     def on_invalid_chart_selection(self, msg):
         """Handle invalid point selection from chart"""
         self.chart.clear_selected_overlay()
+        self.selected_point_vj = None
         self.lbl_selected.setText(f'Selected from chart: None ({msg})')
         self.btn_use_selected.setEnabled(False)
         QtWidgets.QMessageBox.warning(self, 'Invalid selection', msg)
     
-    def _is_physical_solution(self, result, TA=None):
-        """Validate solution is physically consistent"""
+    def _validate_physical_solution(self, result, TA=None):
+        """Validate solution and return (is_valid, reason)."""
         vals = [
             result.get('T0'), result.get('Tj'), result.get('P0'),
             result.get('Pj'), result.get('RH_0'), result.get('RH_j')
         ]
         if any((v is None or not np.isfinite(v)) for v in vals):
-            return False
+            return False, 'Non-finite values in T0/Tj/P0/Pj/RH0/RHj.'
         if result['P0'] <= 0.0 or result['Pj'] <= 0.0:
-            return False
+            return False, 'Vapor pressure must be positive (P0 and Pj > 0).'
         if not (0.0 <= result['RH_0'] <= 1.0 and 0.0 <= result['RH_j'] <= 1.0):
-            return False
+            rh0 = result['RH_0'] * 100.0
+            rhj = result['RH_j'] * 100.0
+            return False, f'Relative humidity out of range: RH0={rh0:.1f}%, RHj={rhj:.1f}%.'
         
         if TA is not None and np.isfinite(TA):
             t_min = min(TA, result['T0']) - 1e-6
             t_max = max(TA, result['T0']) + 1e-6
             if not (t_min <= result['Tj'] <= t_max):
-                return False
+                return False, (
+                    f'Tj={result["Tj"]:.2f} C is outside mixing bounds '
+                    f'[{t_min:.2f}, {t_max:.2f}] C.'
+                )
         elif result['Tj'] < result['T0'] - 1e-6:
-            return False
+            return False, (
+                f'Tj={result["Tj"]:.2f} C cannot be lower than T0={result["T0"]:.2f} C '
+                'for this formulation.'
+            )
         
-        return True
+        return True, None
     
     def use_selected_point(self):
         """Calculate from selected point on chart"""
@@ -418,18 +434,25 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         
         T_j_selected, W_j_selected = self.chart.selected_Tj_point
+        vj_selected = self.selected_point_vj if self.selected_point_vj is not None else self.e_VJ.value()
         
         try:
             from controllers.main_controller import MainController
             controller = MainController(self)
-            result = controller.solve_from_selected_point(T_j_selected, W_j_selected)
+            result = controller.solve_from_selected_point(
+                T_j_selected,
+                W_j_selected,
+                selected_velocity=vj_selected
+            )
             
-            if not self._is_physical_solution(result, TA=self.e_TA.value()):
+            is_valid, invalid_reason = self._validate_physical_solution(result, TA=self.e_TA.value())
+            if not is_valid:
                 self.chart.clear_operating_solution()
                 self.chart.update_chart()
                 QtWidgets.QMessageBox.warning(
                     self, 'Invalid selection',
-                    'Selected point does not produce a physically feasible solution.'
+                    'Selected point does not produce a physically feasible solution.\n\n'
+                    f'Reason: {invalid_reason}'
                 )
                 return
             
@@ -440,7 +463,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.e_P0_inv.setValue(result['P0'])
             self.e_V0_inv.setValue(result['V0'])
             
-            self.chart.set_operating_solution(result, self.e_VJ.value(), source='selected')
+            self.chart.set_operating_solution(result, vj_selected, source='selected')
             self.chart.update_chart()
             
             html = self.build_html(result)
@@ -453,6 +476,7 @@ class MainWindow(QtWidgets.QMainWindow):
         """Run calculation with current parameters"""
         try:
             self.chart.clear_selected_overlay()
+            self.selected_point_vj = None
             self.lbl_selected.setText('Selected from chart: None')
             self.btn_use_selected.setEnabled(False)
             
@@ -460,12 +484,14 @@ class MainWindow(QtWidgets.QMainWindow):
             controller = MainController(self)
             result = controller.solve_normal()
             
-            if not self._is_physical_solution(result, TA=self.e_TA.value()):
+            is_valid, invalid_reason = self._validate_physical_solution(result, TA=self.e_TA.value())
+            if not is_valid:
                 self.chart.clear_operating_solution()
                 self.chart.update_chart()
                 QtWidgets.QMessageBox.warning(
                     self, 'Invalid solution',
-                    'Run result is not physically feasible.'
+                    'Run result is not physically feasible.\n\n'
+                    f'Reason: {invalid_reason}'
                 )
                 return
             
@@ -499,7 +525,7 @@ class MainWindow(QtWidgets.QMainWindow):
         """
         
         rows = [
-            ('V_j (used)', fmt(self.e_VJ.value(), 3), 'm/s'),
+            ('V_j (used)', fmt(result.get('Vj_used', self.e_VJ.value()), 3), 'm/s'),
             ('m (calculated)', fmt(result['m'], 4), 'mmHg/C'),
             ('C (calculated)', fmt(result['C'], 3), 'mmHg'),
             ('T_a(0.5)', fmt(result['Ta50'], 2), 'C'),
@@ -570,16 +596,33 @@ class MainWindow(QtWidgets.QMainWindow):
     def run_cfd_simulation(self):
         """Execute 2D LBM CFD simulation of the jet"""
         try:
-            # First, run normal calculation to get the solution
             from controllers.main_controller import MainController
             controller = MainController(self)
-            result = controller.solve_normal()
             
-            if not self._is_physical_solution(result, TA=self.e_TA.value()):
+            # If a chart point is selected, run CFD from that inverse scenario.
+            if hasattr(self.chart, 'selected_Tj_point') and self.chart.selected_Tj_point is not None:
+                T_j_selected, W_j_selected = self.chart.selected_Tj_point
+                vj_selected = (
+                    self.selected_point_vj
+                    if self.selected_point_vj is not None
+                    else self.e_VJ.value()
+                )
+                result = controller.solve_from_selected_point(
+                    T_j_selected,
+                    W_j_selected,
+                    selected_velocity=vj_selected
+                )
+            else:
+                # Fallback: run normal design scenario.
+                result = controller.solve_normal()
+            
+            is_valid, invalid_reason = self._validate_physical_solution(result, TA=self.e_TA.value())
+            if not is_valid:
                 QtWidgets.QMessageBox.warning(
                     self, 'Invalid solution',
                     'Current parameters do not produce a physical solution. '
-                    'Please adjust parameters and try again.'
+                    'Please adjust parameters and try again.\n\n'
+                    f'Reason: {invalid_reason}'
                 )
                 return
             
@@ -627,6 +670,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 x_zero_index=results.get('x_zero_index'),
                 x_domain_limits=(-results.get('radial_left_extent_m', 0.0),
                                  results.get('radial_right_extent_m', 0.0)),
+                ambient_temp_c=self.e_TA.value(),
+                nozzle_temp_c=result.get('T0'),
+                include_buoyancy=self.chk_buoy.isChecked(),
                 lattice_spacing=results.get('lattice_spacing', 0.001),  # Adaptive spacing
                 velocity_scale=results.get('velocity_scale', 1.0)  # Conversion to m/s
             )

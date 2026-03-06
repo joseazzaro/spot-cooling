@@ -26,11 +26,12 @@ class MainController:
         
         Returns: dict with solution from solve_spot_cooling
         """
-        return solve_spot_cooling(
+        target_velocity = self.main_window.e_VJ.value()
+        result = solve_spot_cooling(
             ambient_temp=self.main_window.e_TA.value(),
             ambient_rh_fraction=self.main_window.e_RHA.value() / 100.0,
             mean_radiant_temp=self.main_window.e_TMR.value(),
-            target_velocity=self.main_window.e_VJ.value(),
+            target_velocity=target_velocity,
             metabolic_rate=self.main_window.e_M.value(),
             clothing_icl=self.main_window.e_ICL.value(),
             jet_diameter=self.main_window.e_D0.value(),
@@ -39,23 +40,32 @@ class MainController:
             p_atm_kpa=self.main_window.e_PATM.value(),
             include_buoyancy=self.main_window.chk_buoy.isChecked()
         )
+        result['Vj_used'] = target_velocity
+        return result
     
-    def solve_from_selected_point(self, target_temp, target_humidity_ratio):
+    def solve_from_selected_point(self, target_temp, target_humidity_ratio, selected_velocity=None):
+    
         """
         Inverse solve: find nozzle conditions to achieve target point.
         Uses selected point on psychrometric chart as constraint.
-        
+
         Args:
             target_temp: Target temperature at measurement area [°C]
             target_humidity_ratio: Target humidity ratio at measurement area [kg/kg]
-        
+            selected_velocity: Optional Vj from selected chart point [m/s]
+
         Returns: dict with solution from solve_spot_cooling_from_target_point
         """
-        return solve_spot_cooling_from_target_point(
+        target_velocity = (
+            self.main_window.e_VJ.value()
+            if selected_velocity is None else float(selected_velocity)
+        )
+
+        result = solve_spot_cooling_from_target_point(
             ambient_temp=self.main_window.e_TA.value(),
             ambient_rh_fraction=self.main_window.e_RHA.value() / 100.0,
             mean_radiant_temp=self.main_window.e_TMR.value(),
-            target_velocity=self.main_window.e_VJ.value(),
+            target_velocity=target_velocity,
             metabolic_rate=self.main_window.e_M.value(),
             clothing_icl=self.main_window.e_ICL.value(),
             jet_diameter=self.main_window.e_D0.value(),
@@ -65,3 +75,5 @@ class MainController:
             p_atm_kpa=self.main_window.e_PATM.value(),
             include_buoyancy=self.main_window.chk_buoy.isChecked()
         )
+        result['Vj_used'] = target_velocity
+        return result

@@ -104,7 +104,7 @@ class LBM2DJetSimulator:
                 0.5 * u_sq / self.c_s2
             )
     
-    def set_inlet_condition(self, jet_center_x, jet_radius, velocity):
+    def set_inlet_condition(self, jet_center_x, jet_radius, velocity, diffuser_angle_deg=0.0):
         """
         Set inlet boundary condition at y=0 (ceiling, Dirichlet for velocity).
         Jet enters from top (y=0) and flows downward (uy < 0).
@@ -112,7 +112,8 @@ class LBM2DJetSimulator:
         Args:
             jet_center_x: Center of jet in x direction (lattice units, typically nx/2 for centerline)
             jet_radius: Radius of jet opening (lattice units)
-            velocity: Inlet velocity magnitude (lattice units, flows downward as negative uy)
+            velocity: Inlet velocity magnitude (lattice units, flows downward as positive uy)
+            diffuser_angle_deg: Full diffuser opening angle in degrees
         """
         # Gaussian profile for smooth jet opening
         x_indices = np.arange(self.nx)
@@ -121,10 +122,20 @@ class LBM2DJetSimulator:
         # Gaussian radial profile (smooth nozzle)
         mask = np.exp(-(x_rel**2) / (2 * jet_radius**2))
         
-        # Jet enters at y=0 with downward velocity (uy = +velocity)
-        # No radial velocity at entrance
-        self.ux[0, :] = 0.0
-        self.uy[0, :] = velocity * mask  # Positive = downward (y increases downward)
+        # Jet enters at y=0 with downward velocity (uy positive in this solver convention).
+        uy_profile = velocity * mask
+        self.uy[0, :] = uy_profile
+
+        # Impose diffuser opening angle as outward radial component at inlet.
+        # Angle is interpreted as full opening angle, so each side uses half-angle.
+        half_angle_rad = np.radians(max(0.0, float(diffuser_angle_deg)) * 0.5)
+        tan_half = np.tan(half_angle_rad)
+        if tan_half <= 0.0:
+            self.ux[0, :] = 0.0
+        else:
+            rel = x_rel / max(float(jet_radius), 1e-9)
+            rel = np.clip(rel, -1.0, 1.0)
+            self.ux[0, :] = uy_profile * tan_half * rel
     
     def collision_step(self):
         """BGK collision operator: f_i^new = f_i - (f_i - f_eq_i) / tau"""
@@ -252,8 +263,8 @@ class LBM2DJetSimulator:
         # Outlet BC: prevent backflow
         self._apply_outlet_bc()
     
-    def run_simulation(self, n_steps, jet_center_x=None, jet_radius=None, 
-                     jet_velocity=None, callback=None):
+    def run_simulation(self, n_steps, jet_center_x=None, jet_radius=None,
+                     jet_velocity=None, callback=None, diffuser_angle_deg=0.0):
         """
         Run simulation for n_steps.
         
@@ -263,6 +274,7 @@ class LBM2DJetSimulator:
             jet_radius: Radius of inlet jet (default: 2)
             jet_velocity: Inlet velocity (default: self.u0)
             callback: Function called after each step with progress
+            diffuser_angle_deg: Full diffuser opening angle in degrees
         """
         if jet_center_x is None:
             jet_center_x = self.nx / 2.0
@@ -271,7 +283,12 @@ class LBM2DJetSimulator:
         if jet_velocity is None:
             jet_velocity = self.u0
         
-        self.set_inlet_condition(jet_center_x, jet_radius, jet_velocity)
+        self.set_inlet_condition(
+            jet_center_x,
+            jet_radius,
+            jet_velocity,
+            diffuser_angle_deg=diffuser_angle_deg,
+        )
         
         for step in range(n_steps):
             self.step()

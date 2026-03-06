@@ -34,6 +34,7 @@ class PsychroChart(FigureCanvas):
         
         self.selected_Tj = None
         self.selected_Tj_point = None
+        self.selected_vj = None
         self.selection_artists = []
         self._sat_T = None
         self._sat_W_g = None
@@ -206,8 +207,68 @@ class PsychroChart(FigureCanvas):
         """Clear point selection overlay"""
         self.selected_Tj = None
         self.selected_Tj_point = None
+        self.selected_vj = None
         self._clear_selection_artists()
         self.fig.canvas.draw_idle()
+
+    def _infer_velocity_from_selected_point(self, T_sel, W_sel_g):
+        """Infer continuous Vj from selected point using acceptable-line inversion."""
+        v_min = 0.5
+        v_max = 2.0
+
+        def residual(vj):
+            m, C, _ = acceptable_line_params(self.Icl, self.M, float(vj), self.Tmr)
+            P_line = -m * T_sel + C
+            W_line_g = humidity_ratio_from_vapor_pressure(max(0.1, P_line),
+                                                          self.p_atm_kpa) * 1000.0
+            return W_line_g - W_sel_g
+
+        # Coarse scan to locate nearest value and any sign-change bracket.
+        v_samples = np.linspace(v_min, v_max, 76)
+        f_samples = []
+        for v in v_samples:
+            try:
+                f_samples.append(float(residual(v)))
+            except Exception:
+                f_samples.append(np.nan)
+
+        valid = [(float(v), float(f)) for v, f in zip(v_samples, f_samples) if np.isfinite(f)]
+        if not valid:
+            return None
+
+        # Default fallback: nearest sampled value.
+        best_v, _ = min(valid, key=lambda vf: abs(vf[1]))
+
+        # Refine with bisection when a crossing exists.
+        bracket = None
+        for i in range(len(valid) - 1):
+            v1, f1 = valid[i]
+            v2, f2 = valid[i + 1]
+            if f1 == 0.0:
+                return v1
+            if f1 * f2 <= 0.0:
+                bracket = (v1, v2)
+                break
+
+        if bracket is None:
+            return round(best_v, 3)
+
+        lo, hi = bracket
+        flo = residual(lo)
+        fhi = residual(hi)
+        for _ in range(32):
+            mid = 0.5 * (lo + hi)
+            fmid = residual(mid)
+            if abs(fmid) < 1e-6 or (hi - lo) < 1e-4:
+                return round(float(mid), 3)
+            if flo * fmid <= 0.0:
+                hi = mid
+                fhi = fmid
+            else:
+                lo = mid
+                flo = fmid
+
+        return round(float(0.5 * (lo + hi)), 3)
     
     def update_chart(self, skip_psychro_background=False):
         """Redraw psychrometric chart"""
@@ -297,7 +358,7 @@ class PsychroChart(FigureCanvas):
         # Formatting
         self.ax.set_xlabel('Dry Bulb Temperature (°C)', fontsize=12, weight='bold',
                           labelpad=10)
-        self.ax.set_ylabel('Humidity Ratio (g_water/kg_dry_air)', fontsize=12,
+        self.ax.set_ylabel(r'Humidity Ratio ($\mathbf{g_{w}/kg_{da}}$)', fontsize=12,
                           weight='bold', labelpad=10)
         self.ax.set_title('Psychrometric Chart - Acceptable Comfort Zones\n'
                          '(ASHRAE Standard RP-884)',
@@ -324,7 +385,7 @@ class PsychroChart(FigureCanvas):
         self.fig.canvas.draw_idle()
     
     def _validate_selected_point(self, T_sel, W_sel_g):
-        """Validate selected point is within chart bounds"""
+        """Validate selected point is inside chart and not beyond saturation."""
         if T_sel < 0.0 or T_sel > 50.0 or W_sel_g < 0.0 or W_sel_g > 36.0:
             return False, 'Point outside chart limits.'
         
@@ -332,20 +393,6 @@ class PsychroChart(FigureCanvas):
             W_sat_g = float(np.interp(T_sel, self._sat_T, self._sat_W_g))
             if W_sel_g > W_sat_g + 0.15:
                 return False, 'Invalid point: left of saturation curve.'
-        
-        vj_list = [0.5, 1.0, 1.5, 2.0]
-        w_lines_g = []
-        for vj in vj_list:
-            m, C, _ = acceptable_line_params(self.Icl, self.M, vj, self.Tmr)
-            P_line = -m * T_sel + C
-            W_line = humidity_ratio_from_vapor_pressure(max(0.1, P_line),
-                                                       self.p_atm_kpa)
-            w_lines_g.append(W_line * 1000.0)
-        
-        w_min = min(w_lines_g)
-        w_max = max(w_lines_g)
-        if W_sel_g < (w_min - 0.35) or W_sel_g > (w_max + 0.35):
-            return False, 'Invalid point: outside allowable line band.'
         
         return True, None
     
@@ -360,11 +407,13 @@ class PsychroChart(FigureCanvas):
                 self.parent_window.on_invalid_chart_selection(msg)
             return
         
-        W_j_g_per_kg = event.ydata
+        T_j_c = float(event.xdata)
+        W_j_g_per_kg = float(event.ydata)
         W_j_kg_per_kg = W_j_g_per_kg / 1000.0 if W_j_g_per_kg is not None else None
-        self.selected_Tj = (event.xdata, W_j_kg_per_kg)
+        self.selected_vj = self._infer_velocity_from_selected_point(T_j_c, W_j_g_per_kg)
+        self.selected_Tj = (T_j_c, W_j_kg_per_kg)
         self._draw_selection_overlay()
         self.fig.canvas.draw_idle()
         
         if hasattr(self.parent_window, 'on_chart_selected'):
-            self.parent_window.on_chart_selected(event.xdata, W_j_kg_per_kg)
+            self.parent_window.on_chart_selected(T_j_c, W_j_kg_per_kg, self.selected_vj)

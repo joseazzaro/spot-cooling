@@ -98,7 +98,8 @@ class CFDVisualizerWidget(FigureCanvas):
     
     def __init__(self, parent=None):
         self.fig = Figure(figsize=(13, 8), dpi=100)
-        self.ax = self.fig.add_subplot(111)
+        self.ax_vel = None
+        self.ax_temp = None
         super().__init__(self.fig)
         self.setParent(parent)
         
@@ -112,6 +113,12 @@ class CFDVisualizerWidget(FigureCanvas):
         self.x0_distance_m = None
         self.x_zero_index = None
         self.x_domain_limits = None
+        self.ambient_temp_c = None
+        self.nozzle_temp_c = None
+        self.inlet_velocity_m_s = None
+        self.temperature_data = None
+        self.jet_diameter_m = None
+        self.include_buoyancy = False
         
     def set_simulation_data(
         self,
@@ -125,6 +132,11 @@ class CFDVisualizerWidget(FigureCanvas):
         x0_distance_m=None,
         x_zero_index=None,
         x_domain_limits=None,
+        ambient_temp_c=None,
+        nozzle_temp_c=None,
+        inlet_velocity_m_s=None,
+        jet_diameter_m=None,
+        include_buoyancy=False,
     ):
         """
         Set simulation results for visualization.
@@ -153,7 +165,34 @@ class CFDVisualizerWidget(FigureCanvas):
         self.x0_distance_m = x0_distance_m
         self.x_zero_index = x_zero_index
         self.x_domain_limits = x_domain_limits
+        self.ambient_temp_c = ambient_temp_c
+        self.nozzle_temp_c = nozzle_temp_c
+        self.inlet_velocity_m_s = inlet_velocity_m_s
+        self.jet_diameter_m = jet_diameter_m
+        self.include_buoyancy = bool(include_buoyancy)
+        self.temperature_data = self._compute_temperature_field()
         self.update_visualization()
+
+    def _compute_temperature_field(self):
+        """Build a temperature proxy field for isotherm plotting from velocity mixing."""
+        if self.velocity_data is None:
+            return None
+        if self.ambient_temp_c is None or self.nozzle_temp_c is None:
+            return None
+
+        ambient = float(self.ambient_temp_c)
+        nozzle = float(self.nozzle_temp_c)
+
+        if self.inlet_velocity_m_s is not None and self.inlet_velocity_m_s > 0.0:
+            norm_v = self.velocity_data / float(self.inlet_velocity_m_s)
+        else:
+            vmax = max(float(np.max(self.velocity_data)), 1e-6)
+            norm_v = self.velocity_data / vmax
+
+        norm_v = np.clip(norm_v, 0.0, 1.0)
+
+        # Linear mixing proxy: faster core is closer to nozzle temperature.
+        return ambient - (ambient - nozzle) * norm_v
     
     def update_visualization(self):
         """
@@ -161,14 +200,16 @@ class CFDVisualizerWidget(FigureCanvas):
         
         Domain layout:
         - X (horizontal): radial direction, centered at 0
-        - Y (vertical): axial direction from ceiling (top) downward
+        - Y (vertical): physical height, with 0 at floor and max at ceiling
         - Data format: [ny, nx] - rows are y positions, columns are x positions
         """
-        self.ax.clear()
-        
+        self.fig.clear()
+        self.ax_vel = self.fig.add_subplot(211)
+        self.ax_temp = self.fig.add_subplot(212, sharex=self.ax_vel, sharey=self.ax_vel)
+
         if self.velocity_data is None:
-            self.ax.text(0.5, 0.5, 'No simulation data', 
-                        ha='center', va='center', transform=self.ax.transAxes)
+            self.ax_vel.text(0.5, 0.5, 'No simulation data',
+                             ha='center', va='center', transform=self.ax_vel.transAxes)
             self.fig.canvas.draw_idle()
             return
         
@@ -177,11 +218,13 @@ class CFDVisualizerWidget(FigureCanvas):
         # Create meshgrid: x = radial with configurable origin index for x=0.
         x0_idx = float(self.x_zero_index) if self.x_zero_index is not None else (nx / 2.0)
         xx = (np.arange(nx) - x0_idx) * self.lattice_spacing
-        yy = np.arange(ny) * self.lattice_spacing  # Axial: from ceiling (0) downward
+        # Physical height coordinate: strictly increasing from floor (0) to ceiling (H).
+        yy = np.arange(ny) * self.lattice_spacing
         XX, YY = np.meshgrid(xx, yy)
         
         # White background - no fill
-        self.ax.set_facecolor('white')
+        self.ax_vel.set_facecolor('white')
+        self.ax_temp.set_facecolor('white')
         self.fig.patch.set_facecolor('white')
         
         # Colored contour LINES only (no fill) with robust max to suppress spikes.
@@ -196,20 +239,26 @@ class CFDVisualizerWidget(FigureCanvas):
         else:
             color_max = data_visible_max
         color_max = max(color_max, 1e-6)
-        velocity_for_plot = np.clip(self.velocity_data, 0.0, color_max)
+        # Convert storage convention (row 0 at ceiling) to plotting convention (row 0 at floor).
+        velocity_for_plot = np.flipud(np.clip(self.velocity_data, 0.0, color_max))
 
-        # Start above zero to avoid zero-level loops at domain boundaries.
-        level_min = max(color_max / 200.0, 1e-6)
-        levels = np.linspace(level_min, color_max, 15)
-        contour = self.ax.contour(XX, YY, velocity_for_plot, levels=levels,
-                                 cmap='plasma', linewidths=2.0, alpha=1.0)
+        # Fixed velocity isoline spacing: every 0.2 m/s.
+        velocity_step = 0.2
+        if color_max >= velocity_step:
+            levels = np.arange(velocity_step, color_max + 0.5 * velocity_step, velocity_step)
+        else:
+            # Fallback for low-speed cases where 0.2 m/s spacing cannot form contours.
+            level_min = max(color_max / 200.0, 1e-6)
+            levels = np.linspace(level_min, color_max, 6)
+        contour = self.ax_vel.contour(XX, YY, velocity_for_plot, levels=levels,
+                          cmap='plasma', linewidths=2.0, alpha=1.0)
 
         # Label only a subset of levels and skip the top strip to avoid clutter at ceiling.
         label_levels = levels[1::2]
         label_field = velocity_for_plot.copy()
         top_rows_to_skip = max(1, int(0.08 * ny))
-        label_field[:top_rows_to_skip, :] = np.nan
-        label_contour = self.ax.contour(
+        label_field[-top_rows_to_skip:, :] = np.nan
+        label_contour = self.ax_vel.contour(
             XX,
             YY,
             label_field,
@@ -218,7 +267,7 @@ class CFDVisualizerWidget(FigureCanvas):
             linewidths=0.0,
             alpha=0.0,
         )
-        self.ax.clabel(
+        self.ax_vel.clabel(
             label_contour,
             label_levels,
             inline=True,
@@ -229,51 +278,110 @@ class CFDVisualizerWidget(FigureCanvas):
         )
         
         # Add colorbar to show velocity scale
-        cbar = self.fig.colorbar(contour, ax=self.ax, label='Velocity Magnitude (m/s)')
+        self.fig.colorbar(contour, ax=self.ax_vel, label='Velocity Magnitude (m/s)')
         
         # Streamlines: white, subtle, just to show flow direction
         stride = max(1, ny // 20)
-        ux_sample = self.ux_data[::stride, ::stride]
-        uy_sample = self.uy_data[::stride, ::stride]
+        ux_for_plot = np.flipud(self.ux_data)
+        # y-axis is upward-positive in plot coordinates, so downward CFD velocity is negative.
+        uy_for_plot = -np.flipud(self.uy_data)
+        ux_sample = ux_for_plot[::stride, ::stride]
+        uy_sample = uy_for_plot[::stride, ::stride]
         XX_sample = XX[::stride, ::stride]
         YY_sample = YY[::stride, ::stride]
         
-        self.ax.streamplot(XX_sample, YY_sample, ux_sample, uy_sample,
-                          color='lightgray', linewidth=0.7, density=1.5, 
-                          arrowsize=1.5, arrowstyle='->')
+        self.ax_vel.streamplot(XX_sample, YY_sample, ux_sample, uy_sample,
+                       color='lightgray', linewidth=0.7, density=1.5,
+                       arrowsize=1.5, arrowstyle='->')
         
         # Formatting
-        self.ax.set_xlabel('Radial Distance (m)', fontsize=11, weight='bold')
-        self.ax.set_ylabel('Axial Distance (m) [Ceiling at Top, Flow Down]', fontsize=11, weight='bold')
-        self.ax.set_title('2D Jet Velocity Field from Ceiling Diffuser (LBM Simulation)', 
-                         fontsize=12, weight='bold')
-        # Keep physical proportions (no geometric deformation).
-        self.ax.set_aspect('equal', adjustable='box')
+        self.ax_vel.set_ylabel('Axial Distance (m)', fontsize=11, weight='bold')
+        self.ax_vel.set_title('2D Jet Velocity Field from Ceiling Diffuser (LBM Simulation)',
+                      fontsize=12, weight='bold')
+        self.ax_vel.set_aspect('equal', adjustable='box')
 
         # Respect explicit user-defined domain limits when available.
         if self.x_domain_limits is not None:
             x_left, x_right = self.x_domain_limits
             if x_left < x_right:
-                self.ax.set_xlim(float(x_left), float(x_right))
+                self.ax_vel.set_xlim(float(x_left), float(x_right))
         else:
             # Auto-focus x-range around active jet so equal aspect remains readable.
             focus_xlim = self.compute_focus_xlim(velocity_for_plot, xx, color_max)
             if focus_xlim is not None:
-                self.ax.set_xlim(*focus_xlim)
+                self.ax_vel.set_xlim(*focus_xlim)
 
-        self.ax.grid(True, alpha=0.2, linestyle=':', color='gray')
+        self.ax_vel.grid(True, alpha=0.2, linestyle=':', color='gray')
         
-        # Invert y-axis: y=0 at top (ceiling), increasing downward
-        self.ax.invert_yaxis()
+        # Temperature panel (isotherms)
+        if self.temperature_data is not None:
+            temperature_for_plot = np.flipud(self.temperature_data)
+            t_min = float(np.min(temperature_for_plot))
+            t_max = float(np.max(temperature_for_plot))
+            temp_step = 2.0
+            if t_max - t_min < 1e-6:
+                t_levels = np.linspace(t_min - 0.1, t_max + 0.1, 8)
+            else:
+                t_start = np.ceil(t_min / temp_step) * temp_step
+                t_levels = np.arange(t_start, t_max + 0.5 * temp_step, temp_step)
+                if t_levels.size < 2:
+                    # Fallback to preserve visible contours in narrow temperature bands.
+                    t_levels = np.linspace(t_min, t_max, 6)
+
+            contour_t = self.ax_temp.contour(
+                XX,
+                YY,
+                temperature_for_plot,
+                levels=t_levels,
+                cmap='coolwarm',
+                linewidths=1.8,
+                alpha=0.95,
+            )
+            self.ax_temp.clabel(
+                contour_t,
+                contour_t.levels[::2],
+                inline=True,
+                inline_spacing=2,
+                fontsize=9,
+                fmt='%.1f',
+                colors='black',
+            )
+            self.fig.colorbar(contour_t, ax=self.ax_temp, label='Temperature (degC)')
+        else:
+            self.ax_temp.text(
+                0.5,
+                0.5,
+                'Isotherms unavailable (missing TA/T0)',
+                ha='center',
+                va='center',
+                transform=self.ax_temp.transAxes,
+                fontsize=10,
+                color='gray',
+            )
+
+        self.ax_temp.set_xlabel('Radial Distance (m)', fontsize=11, weight='bold')
+        self.ax_temp.set_ylabel('Axial Distance (m)', fontsize=11, weight='bold')
+        self.ax_temp.set_title('Isotherm Field (Temperature Proxy)', fontsize=11, weight='bold')
+        self.ax_temp.set_aspect('equal', adjustable='box')
+        self.ax_temp.grid(True, alpha=0.2, linestyle=':', color='gray')
+
+        if self.x_domain_limits is not None:
+            x_left, x_right = self.x_domain_limits
+            if x_left < x_right:
+                self.ax_temp.set_xlim(float(x_left), float(x_right))
+
+        self.ax_vel.tick_params(labelbottom=False)
 
         # Mark X0 distance from ceiling if provided and inside visible y-range.
         if self.x0_distance_m is not None:
-            y_min, y_max = self.ax.get_ylim()
+            y_min, y_max = self.ax_vel.get_ylim()
             y_low = min(y_min, y_max)
             y_high = max(y_min, y_max)
-            x0 = float(self.x0_distance_m)
+            domain_height = (ny - 1) * self.lattice_spacing
+            x0_from_ceiling = float(self.x0_distance_m)
+            x0 = domain_height - x0_from_ceiling
             if y_low <= x0 <= y_high:
-                self.ax.axhline(
+                self.ax_vel.axhline(
                     y=x0,
                     color='dimgray',
                     linestyle='--',
@@ -281,11 +389,32 @@ class CFDVisualizerWidget(FigureCanvas):
                     alpha=0.9,
                     zorder=6,
                 )
-                x_left, x_right = self.ax.get_xlim()
-                self.ax.text(
+                x_left, x_right = self.ax_vel.get_xlim()
+                self.ax_vel.text(
                     x_left + 0.01 * (x_right - x_left),
                     x0,
-                    f'X0 = {x0:.2f} m',
+                    f'X0 = {x0_from_ceiling:.2f} m',
+                    fontsize=10,
+                    color='dimgray',
+                    ha='left',
+                    va='bottom',
+                    bbox=dict(facecolor='white', edgecolor='none', alpha=0.65, pad=1.5),
+                    zorder=7,
+                )
+
+                self.ax_temp.axhline(
+                    y=x0,
+                    color='dimgray',
+                    linestyle='--',
+                    linewidth=1.2,
+                    alpha=0.8,
+                    zorder=6,
+                )
+                x_left_t, x_right_t = self.ax_temp.get_xlim()
+                self.ax_temp.text(
+                    x_left_t + 0.01 * (x_right_t - x_left_t),
+                    x0,
+                    f'X0 = {x0_from_ceiling:.2f} m',
                     fontsize=10,
                     color='dimgray',
                     ha='left',
@@ -350,6 +479,9 @@ class CFDResultsDialog(QtWidgets.QDialog):
         axial_distance_x0=None,
         x_zero_index=None,
         x_domain_limits=None,
+        ambient_temp_c=None,
+        nozzle_temp_c=None,
+        include_buoyancy=False,
         lattice_spacing=1.0,
         velocity_scale=1.0,
     ):
@@ -378,6 +510,11 @@ class CFDResultsDialog(QtWidgets.QDialog):
             x0_distance_m=axial_distance_x0,
             x_zero_index=x_zero_index,
             x_domain_limits=x_domain_limits,
+            ambient_temp_c=ambient_temp_c,
+            nozzle_temp_c=nozzle_temp_c,
+            inlet_velocity_m_s=inlet_velocity,
+            jet_diameter_m=jet_diameter_physical,
+            include_buoyancy=include_buoyancy,
         )
         
         # Update statistics
